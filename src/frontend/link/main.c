@@ -6,6 +6,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <signal.h>
 #include <sys/socket.h>
 #include <unistd.h>
 
@@ -34,20 +35,53 @@ static uint8_t *read_file(const char *path, size_t *size) {
   return data;
 }
 
+static int write_all(int socket, const void *data, size_t size) {
+  const uint8_t *p = data;
+  while (size) {
+    ssize_t n = send(socket, p, size, MSG_NOSIGNAL);
+    if (n < 0 && errno == EINTR) continue;
+    if (n <= 0) return -1;
+    p += n;
+    size -= (size_t)n;
+  }
+  return 0;
+}
+
+static int read_all(int socket, void *data, size_t size) {
+  uint8_t *p = data;
+  while (size) {
+    ssize_t n = recv(socket, p, size, 0);
+    if (n < 0 && errno == EINTR) continue;
+    if (n <= 0) return -1;
+    p += n;
+    size -= (size_t)n;
+  }
+  return 0;
+}
+
+static int handshake(int socket, size_t rom_size) {
+  static const uint8_t magic[8] = {'G', 'B', 'L', 'I', 'N', 'K', '0', '1'};
+  uint8_t message[12], received[12];
+  uint32_t size = htonl((uint32_t)rom_size);
+  memcpy(message, magic, sizeof magic);
+  memcpy(message + sizeof magic, &size, sizeof size);
+  if (write_all(socket, message, sizeof message) ||
+      read_all(socket, received, sizeof received) ||
+      memcmp(received, message, sizeof message) != 0)
+    return -1;
+  return 0;
+}
+
 static void transfer(void *user, uint8_t out, uint8_t *in) {
   link_t *link = user;
-  ssize_t n;
-  do n = send(link->socket, &out, 1, 0); while (n < 0 && errno == EINTR);
-  if (n != 1) {
+  if (write_all(link->socket, &out, 1)) {
     link->failed = 1;
     *in = 0xff;
     return;
   }
-  do n = recv(link->socket, in, 1, MSG_WAITALL); while (n < 0 && errno == EINTR);
-  if (n != 1) {
+  if (read_all(link->socket, in, 1))
     link->failed = 1;
-    *in = 0xff;
-  }
+  if (link->failed) *in = 0xff;
 }
 
 static int connect_peer(const char *host, const char *port) {
@@ -100,6 +134,8 @@ int main(int argc, char **argv) {
   link_t link;
   int socket_fd;
 
+  signal(SIGPIPE, SIG_IGN);
+
   if ((argc != 4 && argc != 5 && argc != 6) ||
       (strcmp(argv[2], "listen") == 0 && argc != 4 && argc != 5) ||
       (strcmp(argv[2], "connect") == 0 && argc != 5 && argc != 6) ||
@@ -126,6 +162,11 @@ int main(int argc, char **argv) {
   socket_fd = strcmp(mode, "listen") == 0 ? listen_peer(port)
                                             : connect_peer(host, port);
   if (socket_fd < 0) {
+    free(rom);
+    return 1;
+  }
+  if (handshake(socket_fd, rom_size)) {
+    close(socket_fd);
     free(rom);
     return 1;
   }
