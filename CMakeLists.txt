@@ -54,6 +54,8 @@ target_compile_options(gb-gameplay-test PRIVATE -Wall -Wextra -Werror)
 add_test(NAME gameplay COMMAND gb-gameplay-test)
 add_test(NAME blargg COMMAND sh ${CMAKE_CURRENT_SOURCE_DIR}/tests/run_blargg.sh
   $<TARGET_FILE:gb-headless>)
+add_test(NAME mooneye COMMAND sh ${CMAKE_CURRENT_SOURCE_DIR}/tests/run_mooneye.sh
+  $<TARGET_FILE:gb-headless>)
 
 if(EMSCRIPTEN)
   add_executable(gb-wasm src/frontend/wasm/main.c)

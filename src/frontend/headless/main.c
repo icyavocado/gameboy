@@ -42,13 +42,28 @@ static int contains(const char *data, size_t length, const char *needle) {
       return 1;
   return 0;
 }
+static int parse_number(const char *text, unsigned long max, unsigned long *value) {
+  char *end = NULL;
+  unsigned long parsed;
+  errno = 0;
+  parsed = strtoul(text, &end, 0);
+  if (errno == ERANGE || end == text || *end != '\0' || parsed > max)
+    return -1;
+  *value = parsed;
+  return 0;
+}
 
 int main(int argc, char **argv) {
   const char *expected = NULL;
   int require_pass = 0;
+  int require_hram = 0;
+  int require_regs = 0;
+  uint16_t hram_address = 0;
+  uint8_t hram_value = 0;
   int frames_arg = 0;
   if (argc < 2) {
-    fprintf(stderr, "usage: %s ROM [frames] [--expect TEXT] [--require-pass]\n", argv[0]);
+    fprintf(stderr, "usage: %s ROM [frames] [--expect TEXT] [--require-pass] "
+                    "[--require-hram ADDRESS VALUE]\n", argv[0]);
     return 2;
   }
   for (int i = 2; i < argc; i++) {
@@ -56,10 +71,25 @@ int main(int argc, char **argv) {
       expected = argv[++i];
     else if (strcmp(argv[i], "--require-pass") == 0)
       require_pass = 1;
+    else if (strcmp(argv[i], "--require-hram") == 0 && i + 2 < argc) {
+      unsigned long address, value;
+      if (parse_number(argv[++i], 0xffff, &address) ||
+          parse_number(argv[++i], 0xff, &value))
+        return 2;
+      if (address < 0xff80 || address > 0xfffe)
+        return 2;
+      hram_address = (uint16_t)address;
+      hram_value = (uint8_t)value;
+      require_hram = 1;
+    }
+    else if (strcmp(argv[i], "--require-regs") == 0) {
+      require_regs = 1;
+    }
     else if (!frames_arg)
       frames_arg = i;
     else {
-      fprintf(stderr, "usage: %s ROM [frames] [--expect TEXT] [--require-pass]\n", argv[0]);
+      fprintf(stderr, "usage: %s ROM [frames] [--expect TEXT] [--require-pass] "
+                      "[--require-hram ADDRESS VALUE]\n", argv[0]);
       return 2;
     }
   }
@@ -91,9 +121,17 @@ int main(int argc, char **argv) {
                             expected ? strlen(expected) : 0, serial_output, 0};
   gb_set_serial_callback(g, serial, &output);
   while (frames--) gb_run_frame(g);
+  int hram_ok = !require_hram || gb_dbg_read(g, hram_address) == hram_value;
+  gb_regs_t regs;
+  gb_dbg_regs(g, &regs);
+  int regs_ok = !require_regs ||
+                ((regs.bc >> 8) == 3 && (uint8_t)regs.bc == 5 &&
+                 (regs.de >> 8) == 8 && (uint8_t)regs.de == 13 &&
+                 (regs.hl >> 8) == 21 && (uint8_t)regs.hl == 34);
   gb_destroy(g);
-  if (output.failed || (require_pass && !output.passed) || (expected &&
-                        !contains(serial_output, output.output_length, expected)))
+  if (output.failed || (require_pass && !output.passed) ||
+      (expected && !contains(serial_output, output.output_length, expected)) ||
+      !hram_ok || !regs_ok)
     return 1;
   return 0;
 }
