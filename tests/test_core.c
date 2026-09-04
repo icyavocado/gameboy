@@ -795,7 +795,7 @@ UTEST(core, apu_square_channel) {
   ASSERT_TRUE(gb_dbg_read(g, 0xff26) & 1);
   gb_run_frame(g);
   ASSERT_EQ(audio_calls, 1);
-  ASSERT_EQ(audio_frames, 735);
+  ASSERT_EQ(audio_frames, 803);
   ASSERT_TRUE(audio_peak > 0);
   gb_destroy(g);
 }
@@ -817,7 +817,7 @@ UTEST(core, apu_wave_and_noise_channels) {
   ASSERT_TRUE(gb_dbg_read(g, 0xff26) & 4);
   gb_run_frame(g);
   ASSERT_EQ(audio_calls, 1);
-  ASSERT_EQ(audio_frames, 735);
+  ASSERT_EQ(audio_frames, 803);
   ASSERT_TRUE(audio_peak > 0);
   gb_dbg_write(g, 0xff20, 0x05);
   gb_dbg_write(g, 0xff21, 0xf0);

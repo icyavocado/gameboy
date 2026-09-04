@@ -8,6 +8,8 @@
 #define STATE_HEADER_SIZE 24u
 #define MAX_BREAKPOINTS 16u
 #define RTC_SAVE_SIZE 24u
+#define AUDIO_RATE 48000u
+#define AUDIO_CLOCK 4194304u
 struct gb {
   uint8_t *rom, *ram, *boot_rom, mem[65536];
   uint8_t vram[2][0x2000], wram[8][0x1000], oam[0xa0];
@@ -28,6 +30,7 @@ struct gb {
   unsigned ppu_cycles;
   unsigned dma_cycles;
   uint32_t rtc_cycles;
+  uint32_t audio_remainder;
   uint32_t audio_phase[4];
   uint16_t noise_lfsr;
   uint8_t audio_enabled[4];
@@ -119,7 +122,7 @@ static int16_t audio_sample(gb_t *g, unsigned channel) {
   uint8_t control = g->mem[base + 2];
   if (channel == 2) {
     uint16_t frequency = (uint16_t)((g->mem[base + 4] & 7) << 8 | g->mem[base + 3]);
-    uint32_t step = (uint32_t)(((uint64_t)(2048 - frequency) * 65536u) / 44100u);
+    uint32_t step = (uint32_t)(((uint64_t)(2048 - frequency) * 65536u) / AUDIO_RATE);
     unsigned index = (g->audio_phase[2] >> 16) & 31;
     uint8_t volume = (control >> 5) & 3;
     uint8_t sample = (g->mem[0xff30 + index / 2] >> (index & 1 ? 0 : 4)) & 15;
@@ -145,16 +148,20 @@ static int16_t audio_sample(gb_t *g, unsigned channel) {
   uint8_t volume = control >> 4, duty_index = g->mem[base] >> 6;
   uint16_t frequency = (uint16_t)((g->mem[base + 4] & 7) << 8 | g->mem[base + 3]);
   uint16_t hz = (uint16_t)((2048 - frequency) * 131072u / 2048u);
-  uint32_t step = hz ? (uint32_t)(((uint64_t)hz << 32) / 44100u) : 0;
+  uint32_t step = hz ? (uint32_t)(((uint64_t)hz << 32) / AUDIO_RATE) : 0;
   unsigned bit = (g->audio_phase[channel] >> 29) & 7;
   g->audio_phase[channel] += step;
   return (int16_t)((duty[duty_index] & (1u << bit) ? volume : 0) * 512);
 }
 static void audio_frame(gb_t *g) {
-  int16_t samples[735 * 2];
+  unsigned frames;
+  int16_t samples[805 * 2];
+  g->audio_remainder += 70224u * AUDIO_RATE;
+  frames = g->audio_remainder / AUDIO_CLOCK;
+  g->audio_remainder %= AUDIO_CLOCK;
   uint8_t routing = g->mem[0xff25];
   uint8_t left = g->mem[0xff24] >> 4, right = g->mem[0xff24] & 7;
-  for (unsigned i = 0; i < 735; i++) {
+  for (unsigned i = 0; i < frames; i++) {
     int16_t value[4];
     for (unsigned channel = 0; channel < 4; channel++)
       value[channel] = g->audio_enabled[channel] ? audio_sample(g, channel) : 0;
@@ -168,7 +175,7 @@ static void audio_frame(gb_t *g) {
     samples[i * 2 + 1] = (int16_t)(samples[i * 2 + 1] * right / 8);
   }
   if (g->audio && (g->mem[0xff26] & 0x80))
-    g->audio(g->audio_user, samples, 735);
+    g->audio(g->audio_user, samples, frames);
 }
 static unsigned timer_bit(const gb_t *g) {
   static const unsigned bits[] = {9, 3, 5, 7};
@@ -1359,7 +1366,7 @@ int gb_load_ram(gb_t *g, const uint8_t *data, size_t n) {
 }
 size_t gb_save_state_size(const gb_t *g) {
   return g ? STATE_HEADER_SIZE + 0x10000u + sizeof g->vram + sizeof g->wram +
-                        0xa0u + sizeof g->fb + sizeof g->bg_line + 231u + g->ram_size
+                        0xa0u + sizeof g->fb + sizeof g->bg_line + 235u + g->ram_size
            : 0;
 }
 size_t gb_save_state(const gb_t *g, uint8_t *out) {
@@ -1424,6 +1431,7 @@ size_t gb_save_state(const gb_t *g, uint8_t *out) {
   memcpy(p, g->rtc_latched, sizeof g->rtc_latched);
   p += sizeof g->rtc_latched;
   put32(&p, g->rtc_cycles);
+  put32(&p, g->audio_remainder);
   put32(&p, (uint32_t)g->model);
   *p++ = g->key1;
   *p++ = g->opri;
@@ -1508,6 +1516,7 @@ int gb_load_state(gb_t *g, const uint8_t *data, size_t n) {
   memcpy(g->rtc_latched, p, sizeof g->rtc_latched);
   p += sizeof g->rtc_latched;
   g->rtc_cycles = get32(&p);
+  g->audio_remainder = get32(&p);
   g->model = (gb_model_t)get32(&p);
   g->key1 = *p++;
   g->opri = *p++;
@@ -1553,6 +1562,7 @@ void gb_reset(gb_t *g) {
   g->div = 0;
   g->divider = g->timer = 0;
   g->rtc_cycles = 0;
+  g->audio_remainder = 0;
   g->timer_signal = 0;
   g->ppu_cycles = 0;
   g->ppu_mode = 2;

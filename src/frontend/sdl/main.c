@@ -159,7 +159,7 @@ int main(int argc, char **argv) {
     return 1;
   }
   SDL_AudioSpec want = {0};
-  want.freq = 44100;
+  want.freq = 48000;
   want.format = AUDIO_S16SYS;
   want.channels = 2;
   want.samples = 1024;
