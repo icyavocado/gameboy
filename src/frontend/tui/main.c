@@ -15,11 +15,11 @@ int main(int argc, char **argv) {
   if (gb_load_rom(gb, rom, (size_t)size)) return 1;
   free(rom);
   initscr(); cbreak(); noecho(); keypad(stdscr, TRUE);
-  uint16_t regs[6]; int running = 1;
+  gb_regs_t regs; int running = 1;
   while (running) {
-    gb_dbg_regs(gb, regs); erase();
+    gb_dbg_regs(gb, &regs); erase();
     mvprintw(0, 0, "Game Boy TUI  s:step  f:frame  q:quit");
-    mvprintw(2, 0, "AF %04X  BC %04X  DE %04X  HL %04X  SP %04X  PC %04X", regs[0], regs[1], regs[2], regs[3], regs[4], regs[5]);
+    mvprintw(2, 0, "AF %04X  BC %04X  DE %04X  HL %04X  SP %04X  PC %04X", regs.af, regs.bc, regs.de, regs.hl, regs.sp, regs.pc);
     refresh(); int key = getch();
     if (key == 'q') running = 0; else if (key == 's') gb_dbg_step(gb); else if (key == 'f') gb_run_frame(gb);
   }

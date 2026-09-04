@@ -19,7 +19,7 @@ int main(int argc, char **argv) {
   while(run){
     SDL_Event e; while(SDL_PollEvent(&e)) if(e.type==SDL_QUIT)run=0;
 #ifdef GB_ENABLE_TUI
-    if (debug) { int c=getch(); if(c=='q')run=0; if(c=='c')paused=0; if(c=='s')paused=1; uint16_t regs[6]; gb_dbg_regs(g,regs); erase(); mvprintw(0,0,"Game Boy debugger  [s]tep [c]ontinue [q]uit  %s",paused?"paused":"running"); mvprintw(2,0,"AF %04X  BC %04X  DE %04X  HL %04X  SP %04X  PC %04X",regs[0],regs[1],regs[2],regs[3],regs[4],regs[5]); refresh(); }
+    if (debug) { int c=getch(); if(c=='q')run=0; if(c=='c')paused=0; if(c=='s')paused=1; gb_regs_t regs; gb_dbg_regs(g,&regs); erase(); mvprintw(0,0,"Game Boy debugger  [s]tep [c]ontinue [q]uit  %s",paused?"paused":"running"); mvprintw(2,0,"AF %04X  BC %04X  DE %04X  HL %04X  SP %04X  PC %04X",regs.af,regs.bc,regs.de,regs.hl,regs.sp,regs.pc); refresh(); }
 #endif
     if (!paused) gb_run_frame(g);
     SDL_UpdateTexture(t,NULL,gb_framebuffer(g),160*4); SDL_RenderClear(r); SDL_RenderCopy(r,t,NULL,NULL); SDL_RenderPresent(r); SDL_Delay(1);

@@ -1,130 +1,563 @@
 #include "gb.h"
-#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
+/* Invalid SM83 opcodes are intentionally treated as NOPs in Phase 1. */
 struct gb {
-  uint8_t *rom, *ram;
+  uint8_t *rom, *ram, mem[65536];
   size_t rom_size, ram_size;
-  uint8_t mem[0x10000];
-  uint8_t *vram;
   uint32_t fb[160 * 144];
-  uint16_t af, bc, de, hl, sp, pc;
-  uint8_t ime, halted, input, div_counter, lcd_line;
-  uint8_t mbc, rom_bank, ram_bank, ram_enable;
-  uint16_t timer_counter;
+  uint16_t af, bc, de, hl, sp, pc, timer;
+  uint8_t ime, ei_delay, halted, halt_bug, input, div, mbc, rom_bank, ram_bank,
+      ram_enable, upper, mode;
   gb_model_t model;
+  gb_serial_cb serial;
+  void *serial_user;
+  gb_audio_cb audio;
+  void *audio_user;
 };
-
 static uint8_t lo(uint16_t x) { return (uint8_t)x; }
 static uint8_t hi(uint16_t x) { return (uint8_t)(x >> 8); }
-static uint16_t pair(uint8_t h, uint8_t l) { return (uint16_t)((h << 8) | l); }
-static uint8_t read8(const gb_t *g, uint16_t a);
-static void write8(gb_t *g, uint16_t a, uint8_t v);
-static void set_r8(gb_t *g, unsigned n, uint8_t v) {
-  switch (n) { case 0: g->bc = pair(v, lo(g->bc)); break; case 1: g->bc = pair(hi(g->bc), v); break; case 2: g->de = pair(v, lo(g->de)); break; case 3: g->de = pair(hi(g->de), v); break; case 4: g->hl = pair(v, lo(g->hl)); break; case 5: g->hl = pair(hi(g->hl), v); break; case 6: write8(g, g->hl, v); break; default: g->af = pair(v, lo(g->af)); break; }
+static uint16_t pr(uint8_t h, uint8_t l) { return (uint16_t)(h << 8 | l); }
+static uint8_t f(const gb_t *g, unsigned n) {
+  return (uint8_t)(lo(g->af) >> n & 1);
 }
-
-static uint8_t read8(const gb_t *g, uint16_t a) {
-  if (a < 0x4000 && g->rom) return g->rom[a];
-  if (a < 0x8000 && g->rom) {
-    size_t bank = g->rom_bank % (g->rom_size / 0x4000 ? g->rom_size / 0x4000 : 1);
-    return g->rom[bank * 0x4000 + (a - 0x4000)];
+static void fs(gb_t *g, unsigned z, unsigned n, unsigned h, unsigned c) {
+  g->af = (uint16_t)((g->af & 0xff00) | (z << 7 | n << 6 | h << 5 | c << 4));
+}
+static uint8_t rd(const gb_t *, uint16_t);
+static void wr(gb_t *, uint16_t, uint8_t);
+static uint8_t *rp8(gb_t *g, unsigned n) {
+  switch (n) {
+  case 0:
+    return (uint8_t *)&g->bc + 1;
+  case 1:
+    return (uint8_t *)&g->bc;
+  case 2:
+    return (uint8_t *)&g->de + 1;
+  case 3:
+    return (uint8_t *)&g->de;
+  case 4:
+    return (uint8_t *)&g->hl + 1;
+  case 5:
+    return (uint8_t *)&g->hl;
+  default:
+    return (uint8_t *)&g->af + 1;
   }
-  if (a >= 0xa000 && a < 0xc000 && g->ram && g->ram_enable) return g->ram[(g->ram_bank * 0x2000 + a - 0xa000) % g->ram_size];
-  if (a == 0xff00) return (uint8_t)(0xc0 | (g->input & 0x0f));
-  return g->mem[a];
 }
-
-static void write8(gb_t *g, uint16_t a, uint8_t v) {
-  if (a < 0x2000 && g->mbc) { g->ram_enable = (v & 0x0f) == 0x0a; return; }
-  if (a >= 0x2000 && a < 0x4000 && g->mbc) { g->rom_bank = v & 0x1f; if (!g->rom_bank) g->rom_bank = 1; return; }
-  if (a >= 0x4000 && a < 0x6000 && g->mbc) { g->ram_bank = v & 3; return; }
-  if (a >= 0xa000 && a < 0xc000 && g->ram && g->ram_enable) { g->ram[(g->ram_bank * 0x2000 + a - 0xa000) % g->ram_size] = v; return; }
-  if (a == 0xff04) { g->mem[a] = 0; g->div_counter = 0; return; }
-  if (a == 0xff44) { g->mem[a] = 0; g->lcd_line = 0; return; }
+static uint16_t *rp16(gb_t *g, unsigned n) {
+  return n == 0 ? &g->bc : n == 1 ? &g->de : n == 2 ? &g->hl : &g->sp;
+}
+static uint8_t gr(gb_t *g, unsigned n) {
+  return n == 6 ? rd(g, g->hl) : *rp8(g, n);
+}
+static void sr(gb_t *g, unsigned n, uint8_t v) {
+  if (n == 6)
+    wr(g, g->hl, v);
+  else
+    *rp8(g, n) = v;
+}
+static uint8_t fc(gb_t *g) {
+  uint8_t v = rd(g, g->pc);
+  if (!g->halt_bug)
+    g->pc++;
+  else
+    g->halt_bug = 0;
+  return v;
+}
+static uint16_t fn(gb_t *g) {
+  uint8_t l = fc(g);
+  return pr(fc(g), l);
+}
+static void push(gb_t *g, uint16_t v) {
+  wr(g, --g->sp, hi(v));
+  wr(g, --g->sp, lo(v));
+}
+static uint16_t pop(gb_t *g) {
+  uint8_t l = rd(g, g->sp++), h = rd(g, g->sp++);
+  return pr(h, l);
+}
+static size_t ramsize(uint8_t c) {
+  static const size_t n[] = {0, 0x800, 0x2000, 0x8000, 0x20000, 0x10000};
+  return c < 6 ? n[c] : 0;
+}
+static size_t rb(const gb_t *g, uint16_t a) {
+  size_t banks = g->rom_size / 0x4000;
+  unsigned b = a < 0x4000 ? 0 : g->rom_bank;
+  if (!banks)
+    banks = 1;
+  if (g->mbc && a < 0x4000 && !g->mode)
+    b = g->upper << 5;
+  return ((size_t)(b % banks) * 0x4000 + (a & 0x3fff)) % g->rom_size;
+}
+static uint8_t jp(const gb_t *g) {
+  uint8_t s = g->mem[0xff00] & 0x30, v = 0xf;
+  if (!(s & 0x10))
+    v &= (uint8_t)~(g->input >> 4);
+  if (!(s & 0x20))
+    v &= (uint8_t)~(g->input & 15);
+  return (uint8_t)(0xc0 | s | v);
+}
+static uint8_t rd(const gb_t *g, uint16_t a) {
+  if (a < 0x8000 && g->rom)
+    return g->rom[rb(g, a)];
+  if (a >= 0xa000 && a < 0xc000 && g->ram && g->ram_enable)
+    return g->ram[((size_t)(g->mode ? g->ram_bank : 0) * 0x2000 + a - 0xa000) %
+                  g->ram_size];
+  return a == 0xff00 ? jp(g) : g->mem[a];
+}
+static void wr(gb_t *g, uint16_t a, uint8_t v) {
+  if (g->mbc && a < 0x2000) {
+    g->ram_enable = (v & 15) == 10;
+    return;
+  }
+  if (g->mbc && a < 0x4000) {
+    g->rom_bank = v & 31;
+    if (!g->rom_bank)
+      g->rom_bank = 1;
+    g->rom_bank |= g->upper << 5;
+    return;
+  }
+  if (g->mbc && a < 0x6000) {
+    if (g->mode)
+      g->ram_bank = v & 3;
+    else {
+      g->upper = v & 3;
+      g->rom_bank = (g->rom_bank & 31) | (g->upper << 5);
+    }
+    return;
+  }
+  if (g->mbc && a < 0x8000) {
+    g->mode = v & 1;
+    return;
+  }
+  if (a >= 0xa000 && a < 0xc000 && g->ram && g->ram_enable) {
+    g->ram[((size_t)(g->mode ? g->ram_bank : 0) * 0x2000 + a - 0xa000) %
+           g->ram_size] = v;
+    return;
+  }
+  if (a == 0xff00) {
+    g->mem[a] = (uint8_t)((g->mem[a] & 0xcf) | (v & 0x30));
+    return;
+  }
+  if (a == 0xff04) {
+    g->mem[a] = 0;
+    g->div = 0;
+    g->timer = 0;
+    return;
+  }
+  if (a == 0xff02 && (v & 0x80) && g->serial) {
+    uint8_t in = 0xff;
+    g->serial(g->serial_user, g->mem[0xff01], &in);
+    g->mem[0xff01] = in;
+    g->mem[0xff0f] |= 8;
+    v &= 0x7f;
+  }
   g->mem[a] = v;
 }
-
-static uint8_t fetch(gb_t *g) { return read8(g, g->pc++); }
-static uint16_t fetch16(gb_t *g) { uint8_t l = fetch(g); return pair(fetch(g), l); }
-static void push(gb_t *g, uint16_t v) { write8(g, --g->sp, hi(v)); write8(g, --g->sp, lo(v)); }
-static uint16_t pop(gb_t *g) { uint8_t l = read8(g, g->sp++), h = read8(g, g->sp++); return pair(h, l); }
-static void flags(gb_t *g, uint8_t z, uint8_t n, uint8_t h, uint8_t c) { g->af = (g->af & 0xff00) | (z << 7) | (n << 6) | (h << 5) | (c << 4); }
-static uint8_t f(const gb_t *g, uint8_t n) { return (lo(g->af) >> n) & 1; }
-
-static void add_a(gb_t *g, uint8_t v, uint8_t carry) {
-  uint8_t a = hi(g->af); uint16_t x = a + v + carry;
-  flags(g, !(x & 255), 0, ((a & 15) + (v & 15) + carry) > 15, x > 255); g->af = pair((uint8_t)x, lo(g->af));
+static uint8_t inc(gb_t *g, uint8_t v) {
+  uint8_t r = v + 1;
+  fs(g, r == 0, 0, (v & 15) == 15, f(g, 4));
+  return r;
 }
-static void render_line(gb_t *g, unsigned y) {
-  uint8_t scx = g->mem[0xff43], scy = g->mem[0xff42], lcdc = g->mem[0xff40];
-  for (unsigned x = 0; x < 160; x++) {
-    uint8_t shade = 0;
-    if (lcdc & 1) {
-      unsigned px = (x + scx) & 255, py = (y + scy) & 255;
-      uint16_t map = (lcdc & 8) ? 0x1c00 : 0x1800, tile = g->vram[map + (py / 8) * 32 + px / 8];
-      uint16_t data = (lcdc & 16) ? tile * 16 : 0x1000 + (int8_t)tile * 16;
-      uint8_t b1 = g->vram[data + (py & 7) * 2], b2 = g->vram[data + (py & 7) * 2 + 1];
-      unsigned bit = 7 - (px & 7); shade = ((b2 >> bit) & 1) * 2 + ((b1 >> bit) & 1);
+static uint8_t dec(gb_t *g, uint8_t v) {
+  uint8_t r = v - 1;
+  fs(g, r == 0, 1, (v & 15) == 0, f(g, 4));
+  return r;
+}
+static void alu(gb_t *g, unsigned n, uint8_t v) {
+  uint8_t a = hi(g->af), c = f(g, 4), r = 0;
+  unsigned h = 0, ca = 0;
+  uint16_t x;
+  if (n < 4) {
+    if (n < 2) {
+      x = a + v + (n == 2 ? c : 0);
+      r = (uint8_t)x;
+      h = ((a & 15) + (v & 15) + (n == 2 ? c : 0)) > 15;
+      ca = x > 255;
+    } else {
+      x = (uint16_t)a - v - (n == 3 ? c : 0);
+      r = (uint8_t)x;
+      h = (a & 15) < ((v & 15) + (n == 3 ? c : 0));
+      ca = x > 255;
     }
-    static const uint32_t colors[] = { 0xfff8f8f8, 0xffa8a8a8, 0xff585858, 0xff101010 };
-    g->fb[y * 160 + x] = colors[(g->mem[0xff47] >> (shade * 2)) & 3];
+    fs(g, r == 0, n >= 2, h, ca);
+  } else {
+    r = n == 4 ? a & v : n == 5 ? a ^ v : a | v;
+    fs(g, r == 0, 0, n == 4, 0);
+  }
+  if (n != 7)
+    g->af = pr(r, lo(g->af));
+}
+static void daa(gb_t *g) {
+  uint8_t a = hi(g->af), q = 0, c = f(g, 4);
+  if (!f(g, 6)) {
+    if (c || a > 0x99)
+      q = 0x60, c = 1;
+    if (f(g, 5) || (a & 15) > 9)
+      q |= 6;
+    a += q;
+  } else {
+    if (c)
+      q |= 0x60;
+    if (f(g, 5))
+      q |= 6;
+    a -= q;
+  }
+  g->af = pr(a, lo(g->af));
+  fs(g, a == 0, f(g, 6), 0, c);
+}
+static int cb(gb_t *g, uint8_t o) {
+  unsigned n = o & 7, b = o >> 3 & 7, k = o >> 6;
+  uint8_t v = gr(g, n), r;
+  if (k == 1) {
+    fs(g, !(v & (1u << b)), 0, 1, f(g, 4));
+    return n == 6 ? 12 : 8;
+  }
+  if (k == 2) {
+    sr(g, n, v & ~(1u << b));
+    return n == 6 ? 16 : 8;
+  }
+  if (k == 3) {
+    sr(g, n, v | (1u << b));
+    return n == 6 ? 16 : 8;
+  }
+  switch (b) {
+  case 0:
+    r = (uint8_t)((v << 1) | (v >> 7));
+    fs(g, r == 0, 0, 0, v >> 7);
+    break;
+  case 1:
+    r = (uint8_t)((v >> 1) | (v << 7));
+    fs(g, r == 0, 0, 0, v & 1);
+    break;
+  case 2:
+    r = (uint8_t)((v << 1) | f(g, 4));
+    fs(g, r == 0, 0, 0, v >> 7);
+    break;
+  case 3:
+    r = (uint8_t)((v >> 1) | (f(g, 4) << 7));
+    fs(g, r == 0, 0, 0, v & 1);
+    break;
+  case 4:
+    r = (uint8_t)((v << 1) | (v >> 7));
+    fs(g, r == 0, 0, 0, v >> 7);
+    break;
+  case 5:
+    r = (uint8_t)((v >> 1) | (v & 128));
+    fs(g, r == 0, 0, 0, v & 1);
+    break;
+  case 6:
+    r = (uint8_t)((v << 4) | (v >> 4));
+    fs(g, r == 0, 0, 0, 0);
+    break;
+  default:
+    r = v >> 1;
+    fs(g, r == 0, 0, 0, v & 1);
+    break;
+  }
+  sr(g, n, r);
+  return n == 6 ? 16 : 8;
+}
+static void tick(gb_t *g, unsigned n) {
+  while (n--) {
+    if (++g->div == 0)
+      g->mem[0xff04]++;
+    if (g->mem[0xff07] & 4) {
+      static const uint16_t rate[] = {1024, 16, 64, 256};
+      if (++g->timer >= rate[g->mem[0xff07] & 3]) {
+        g->timer = 0;
+        if (++g->mem[0xff05] == 0) {
+          g->mem[0xff05] = g->mem[0xff06];
+          g->mem[0xff0f] |= 4;
+        }
+      }
+    }
   }
 }
-
+static int irq(gb_t *g) {
+  uint8_t p = g->mem[0xffff] & g->mem[0xff0f] & 31;
+  if (!p)
+    return 0;
+  g->halted = 0;
+  if (!g->ime)
+    return 0;
+  g->ime = 0;
+  {
+    unsigned n = 0;
+    while (!(p & (1u << n)))
+      n++;
+    g->mem[0xff0f] &= (uint8_t)~(1u << n);
+    push(g, g->pc);
+    g->pc = 0x40 + n * 8;
+  }
+  return 20;
+}
 int gb_dbg_step(gb_t *g) {
-  if (g->halted) return 4;
-  uint8_t op = fetch(g), a, v; uint16_t nn;
-  switch (op) {
-  case 0x00: return 4;
-  case 0x01: g->bc = fetch16(g); return 12;
-  case 0x11: g->de = fetch16(g); return 12;
-  case 0x21: g->hl = fetch16(g); return 12;
-  case 0x31: g->sp = fetch16(g); return 12;
-  case 0x3e: g->af = pair(fetch(g), lo(g->af)); return 8;
-  case 0x06: g->bc = pair(fetch(g), lo(g->bc)); return 8;
-  case 0x0e: g->bc = pair(hi(g->bc), fetch(g)); return 8;
-  case 0x16: g->de = pair(fetch(g), lo(g->de)); return 8;
-  case 0x1e: g->de = pair(hi(g->de), fetch(g)); return 8;
-  case 0x26: g->hl = pair(fetch(g), lo(g->hl)); return 8;
-  case 0x2e: g->hl = pair(hi(g->hl), fetch(g)); return 8;
-  case 0x32: write8(g, g->hl, hi(g->af)); g->hl--; return 8;
-  case 0x3a: g->af = pair(read8(g, g->hl--), lo(g->af)); return 8;
-  case 0x77: write8(g, g->hl, hi(g->af)); return 8;
-  case 0x7e: g->af = pair(read8(g, g->hl), lo(g->af)); return 8;
-  case 0x36: write8(g, g->hl, fetch(g)); return 12;
-  case 0x80: add_a(g, hi(g->bc), 0); return 4;
-  case 0x81: add_a(g, lo(g->bc), 0); return 4;
-  case 0x87: add_a(g, hi(g->af), 0); return 4;
-  case 0x90: a = hi(g->af); v = hi(g->bc); flags(g, a == v, 1, (a & 15) < (v & 15), a < v); g->af = pair(a - v, lo(g->af)); return 4;
-  case 0xaf: a = hi(g->af); g->af = pair(0, lo(g->af)); flags(g, 1, 0, 0, 0); (void)a; return 4;
-  case 0xc3: g->pc = fetch16(g); return 16;
-  case 0x18: g->pc = (uint16_t)(g->pc + (int8_t)fetch(g)); return 12;
-  case 0x20: nn = fetch(g); if (!f(g, 7)) g->pc = (uint16_t)(g->pc + (int8_t)nn); return f(g, 7) ? 8 : 12;
-  case 0xcd: nn = fetch16(g); push(g, g->pc); g->pc = nn; return 24;
-  case 0xc9: g->pc = pop(g); return 16;
-  case 0x76: g->halted = 1; return 4;
-  case 0xf3: g->ime = 0; return 4;
-  case 0xfb: g->ime = 1; return 4;
-  default:
-    if ((op & 0xc7) == 0x06) { unsigned n = (op >> 3) & 7; v = fetch(g); set_r8(g, n, v); return n == 6 ? 12 : 8; }
+  int q = irq(g);
+  if (q) {
+    tick(g, q);
+    return q;
+  }
+  if (g->halted) {
+    tick(g, 4);
     return 4;
   }
+  uint8_t o = fc(g), v;
+  unsigned x = o >> 6, y = o >> 3 & 7, z = o & 7;
+  uint16_t n;
+  int c = 4;
+  if (o == 0xcb) {
+    c = cb(g, fc(g));
+    goto done;
+  }
+  if (x == 1) {
+    if (o == 0x76) {
+      g->halted = 1;
+      if (!g->ime && (g->mem[0xffff] & g->mem[0xff0f] & 31))
+        g->halt_bug = 1;
+      c = 4;
+    } else {
+      sr(g, y, gr(g, z));
+      c = (y == 6 || z == 6) ? 8 : 4;
+    }
+    goto done;
+  }
+  if (x == 2) {
+    alu(g, y, gr(g, z));
+    c = z == 6 ? 8 : 4;
+    goto done;
+  }
+  if (x == 3 && z == 6 && o >= 0xc6) {
+    alu(g, y, fc(g));
+    c = 8;
+    goto done;
+  }
+  switch (o) {
+  case 0:
+    break;
+  case 2:
+    wr(g, g->bc, hi(g->af));
+    break;
+  case 0xa:
+    g->af = pr(rd(g, g->bc), lo(g->af));
+    break;
+  case 0x12:
+    wr(g, g->de, hi(g->af));
+    break;
+  case 0x1a:
+    g->af = pr(rd(g, g->de), lo(g->af));
+    break;
+  case 8:
+    n = fn(g);
+    wr(g, n, lo(g->sp));
+    wr(g, n + 1, hi(g->sp));
+    c = 20;
+    break;
+  case 0x22:
+    wr(g, g->hl++, hi(g->af));
+    break;
+  case 0x2a:
+    g->af = pr(rd(g, g->hl++), lo(g->af));
+    break;
+  case 0x32:
+    wr(g, g->hl--, hi(g->af));
+    break;
+  case 0x3a:
+    g->af = pr(rd(g, g->hl--), lo(g->af));
+    break;
+  case 0x27:
+    daa(g);
+    break;
+  case 0x2f:
+    g->af = pr(~hi(g->af), lo(g->af));
+    fs(g, f(g, 7), 1, 1, f(g, 4));
+    break;
+  case 0x37:
+    fs(g, f(g, 7), 0, 0, 1);
+    break;
+  case 0x3f:
+    fs(g, f(g, 7), 0, 0, !f(g, 4));
+    break;
+  case 7:
+    v = hi(g->af);
+    g->af = pr(v << 1 | v >> 7, lo(g->af));
+    fs(g, 0, 0, 0, v >> 7);
+    break;
+  case 0xf3:
+    g->ime = 0;
+    g->ei_delay = 0;
+    break;
+  case 0xfb:
+    g->ei_delay = 2;
+    break;
+  case 0xc3:
+    g->pc = fn(g);
+    c = 16;
+    break;
+  case 0x18:
+    g->pc += ((int8_t)fc(g));
+    c = 12;
+    break;
+  case 0xcd:
+    n = fn(g);
+    push(g, g->pc);
+    g->pc = n;
+    c = 24;
+    break;
+  case 0xc9:
+    g->pc = pop(g);
+    c = 16;
+    break;
+  case 0xd9:
+    g->pc = pop(g);
+    g->ime = 1;
+    c = 16;
+    break;
+  case 0xe0:
+    wr(g, 0xff00 + fc(g), hi(g->af));
+    c = 12;
+    break;
+  case 0xf0:
+    g->af = pr(rd(g, 0xff00 + fc(g)), lo(g->af));
+    c = 12;
+    break;
+  case 0xea:
+    wr(g, fn(g), hi(g->af));
+    c = 16;
+    break;
+  case 0xfa:
+    g->af = pr(rd(g, fn(g)), lo(g->af));
+    c = 16;
+    break;
+  case 0xf9:
+    g->sp = g->hl;
+    c = 8;
+    break;
+  case 0xe9:
+    g->pc = g->hl;
+    break;
+  default:
+    if (x == 0 && z == 1) {
+      *rp16(g, y >> 1) = fn(g);
+      c = 12;
+    } else if (x == 0 && z == 4) {
+      sr(g, y, inc(g, gr(g, y)));
+      c = y == 6 ? 12 : 4;
+    } else if (x == 0 && z == 5) {
+      sr(g, y, dec(g, gr(g, y)));
+      c = y == 6 ? 12 : 4;
+    } else if (x == 0 && z == 6) {
+      sr(g, y, fc(g));
+      c = y == 6 ? 12 : 8;
+    } else if (x == 0 && z == 3) {
+      (*rp16(g, y >> 1))++;
+      c = 8;
+    } else if (x == 0 && z == 2) {
+      int8_t e = (int8_t)fc(g);
+      if (!y || f(g, y - 1))
+        g->pc += e;
+      c = !y || f(g, y - 1) ? 12 : 8;
+    } else if (x == 3 && z == 2 && y < 4) {
+      if (!y || f(g, y - 1))
+        g->pc = fn(g);
+      else
+        g->pc += 2;
+      c = !y || f(g, y - 1) ? 16 : 12;
+    } else if (x == 3 && z == 7) {
+      push(g, g->pc);
+      g->pc = y * 8;
+      c = 16;
+    }
+    break;
+  }
+done:
+  if (g->ei_delay && !--g->ei_delay)
+    g->ime = 1;
+  tick(g, (unsigned)c);
+  return c;
 }
-
+static void line(gb_t *g, unsigned y) {
+  static const uint32_t p[] = {0xfff8f8f8, 0xffa8a8a8, 0xff585858, 0xff101010};
+  for (unsigned x = 0; x < 160; x++)
+    g->fb[y * 160 + x] = p[(g->mem[0xff47] >> ((x & 3) * 2)) & 3];
+}
 void gb_run_frame(gb_t *g) {
-  unsigned cycles = 0;
-  while (cycles < 70224) { int n = gb_dbg_step(g); cycles += (unsigned)n; g->div_counter += (uint8_t)n; g->timer_counter += (uint16_t)n; if (g->timer_counter >= 256) { g->timer_counter -= 256; g->mem[0xff04]++; } }
-  for (unsigned y = 0; y < 144; y++) render_line(g, y);
+  unsigned n = 0;
+  while (n < 70224)
+    n += (unsigned)gb_dbg_step(g);
+  for (unsigned y = 0; y < 144; y++)
+    line(g, y);
 }
-gb_t *gb_create(void) { gb_t *g = calloc(1, sizeof(*g)); g->model = GB_MODEL_AUTO; g->rom_bank = 1; g->vram = g->mem + 0x8000; g->mem[0xff40] = 0x91; g->mem[0xff47] = 0xe4; return g; }
-void gb_destroy(gb_t *g) { if (g) { free(g->rom); free(g->ram); free(g); } }
-int gb_load_rom(gb_t *g, const uint8_t *rom, size_t size) { if (!g || !rom || size < 0x150) return -1; free(g->rom); g->rom = malloc(size); if (!g->rom) return -1; memcpy(g->rom, rom, size); g->rom_size = size; g->mbc = rom[0x147] >= 1 && rom[0x147] <= 3; unsigned banks = rom[0x149] ? (1u << (rom[0x149] + 1)) : 1; g->ram_size = banks * 0x2000; free(g->ram); g->ram = calloc(1, g->ram_size); gb_reset(g); return 0; }
+gb_t *gb_create(void) {
+  gb_t *g = calloc(1, sizeof(*g));
+  if (g) {
+    g->rom_bank = 1;
+    g->mem[0xff40] = 0x91;
+    g->mem[0xff47] = 0xe4;
+    g->mem[0xff00] = 0xcf;
+  }
+  return g;
+}
+void gb_destroy(gb_t *g) {
+  if (g) {
+    free(g->rom);
+    free(g->ram);
+    free(g);
+  }
+}
+int gb_load_rom(gb_t *g, const uint8_t *r, size_t n) {
+  if (!g || !r || n < 0x150)
+    return -1;
+  free(g->rom);
+  free(g->ram);
+  g->rom = malloc(n);
+  if (!g->rom)
+    return -1;
+  memcpy(g->rom, r, n);
+  g->rom_size = n;
+  g->mbc = r[0x147] >= 1 && r[0x147] <= 3;
+  g->ram_size = ramsize(r[0x149]);
+  g->ram = g->ram_size ? calloc(1, g->ram_size) : NULL;
+  if (g->ram_size && !g->ram)
+    return -1;
+  gb_reset(g);
+  return 0;
+}
 void gb_set_model(gb_t *g, gb_model_t m) { g->model = m; }
-void gb_reset(gb_t *g) { g->af = 0x01b0; g->bc = 0x0013; g->de = 0x00d8; g->hl = 0x014d; g->sp = 0xfffe; g->pc = 0x0100; g->halted = 0; g->mem[0xff40] = 0x91; g->mem[0xff47] = 0xe4; }
+void gb_reset(gb_t *g) {
+  g->af = 0x1b0;
+  g->bc = 0x13;
+  g->de = 0xd8;
+  g->hl = 0x14d;
+  g->sp = 0xfffe;
+  g->pc = 0x100;
+  g->ime = g->halted = g->halt_bug = g->ei_delay = 0;
+  g->rom_bank = 1;
+  g->ram_bank = g->upper = g->mode = 0;
+  g->mem[0xff40] = 0x91;
+  g->mem[0xff47] = 0xe4;
+  g->mem[0xff00] = 0xcf;
+}
 const uint32_t *gb_framebuffer(const gb_t *g) { return g->fb; }
-void gb_set_input(gb_t *g, uint8_t buttons) { g->input = buttons; }
-uint8_t gb_dbg_read(const gb_t *g, uint16_t a) { return read8(g, a); }
-void gb_dbg_write(gb_t *g, uint16_t a, uint8_t v) { write8(g, a, v); }
-void gb_dbg_regs(const gb_t *g, uint16_t out[6]) { out[0]=g->af; out[1]=g->bc; out[2]=g->de; out[3]=g->hl; out[4]=g->sp; out[5]=g->pc; }
+void gb_set_input(gb_t *g, uint8_t v) { g->input = v; }
+void gb_set_audio_callback(gb_t *g, gb_audio_cb c, void *u) {
+  g->audio = c;
+  g->audio_user = u;
+}
+void gb_set_serial_callback(gb_t *g, gb_serial_cb c, void *u) {
+  g->serial = c;
+  g->serial_user = u;
+}
+uint8_t gb_dbg_read(const gb_t *g, uint16_t a) { return rd(g, a); }
+void gb_dbg_write(gb_t *g, uint16_t a, uint8_t v) { wr(g, a, v); }
+void gb_dbg_regs(const gb_t *g, gb_regs_t *o) {
+  o->af = g->af;
+  o->bc = g->bc;
+  o->de = g->de;
+  o->hl = g->hl;
+  o->sp = g->sp;
+  o->pc = g->pc;
+  o->ime = g->ime;
+  o->halted = g->halted;
+}
