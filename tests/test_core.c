@@ -326,6 +326,32 @@ UTEST(core, apu_square_channel) {
   gb_destroy(g);
 }
 
+UTEST(core, apu_wave_and_noise_channels) {
+  gb_t *g = load((const uint8_t[]){0x00}, 1);
+  audio_calls = 0;
+  audio_frames = 0;
+  audio_peak = 0;
+  gb_set_audio_callback(g, audio_callback, NULL);
+  gb_dbg_write(g, 0xff26, 0x80);
+  gb_dbg_write(g, 0xff30, 0xff);
+  gb_dbg_write(g, 0xff31, 0xff);
+  gb_dbg_write(g, 0xff1a, 0x80);
+  gb_dbg_write(g, 0xff1c, 0x20);
+  gb_dbg_write(g, 0xff1e, 0x80);
+  gb_dbg_write(g, 0xff24, 0x77);
+  gb_dbg_write(g, 0xff25, 0x44);
+  ASSERT_TRUE(gb_dbg_read(g, 0xff26) & 4);
+  gb_run_frame(g);
+  ASSERT_EQ(audio_calls, 1);
+  ASSERT_EQ(audio_frames, 735);
+  ASSERT_TRUE(audio_peak > 0);
+  gb_dbg_write(g, 0xff20, 0x05);
+  gb_dbg_write(g, 0xff21, 0xf0);
+  gb_dbg_write(g, 0xff23, 0x80);
+  ASSERT_TRUE(gb_dbg_read(g, 0xff26) & 8);
+  gb_destroy(g);
+}
+
 UTEST(core, extended_control_and_stack_opcodes) {
   static const uint8_t code[] = {
       0x01, 0x34, 0x12, 0x21, 0x00, 0x10, 0x09, 0x0b, 0xc5,
@@ -405,6 +431,7 @@ int main(void) {
   core_battery_ram_round_trip();
   core_save_state_round_trip();
   core_apu_square_channel();
+  core_apu_wave_and_noise_channels();
   core_extended_control_and_stack_opcodes();
   core_conditional_relative_and_signed_stack_arithmetic();
   core_oam_dma_transfer();
