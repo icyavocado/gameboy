@@ -16,7 +16,7 @@ struct gb {
   uint8_t ime, ei_delay, halted, halt_bug, input, div, mbc, battery, ram_bank,
       ram_enable, upper, mode, ppu_mode, stat_signal, dma_page, dma_index,
       dma_active, timer_signal, rtc_select, rtc_latched_valid, rtc[5],
-      rtc_latched[5], vbk, svbk, bg_palette_index, obj_palette_index, key1;
+      rtc_latched[5], vbk, svbk, bg_palette_index, obj_palette_index, key1, opri;
   uint16_t rom_bank;
   uint16_t hdma_source, hdma_dest;
   uint8_t hdma5;
@@ -290,6 +290,8 @@ static uint8_t rd(const gb_t *g, uint16_t a) {
                      g->ppu_mode);
   if (a == 0xff4d)
     return g->model == GB_MODEL_CGB ? (uint8_t)(0x7e | g->key1) : 0xff;
+  if (a == 0xff6c)
+    return g->model == GB_MODEL_CGB ? (uint8_t)(0xfe | g->opri) : 0xff;
   if (a >= 0xa000 && a < 0xc000 && g->mbc == 2)
     return g->ram_enable && a < 0xa200
                ? (uint8_t)(0xf0 | (g->ram[a - 0xa000] & 0x0f))
@@ -434,6 +436,11 @@ static void wr(gb_t *g, uint16_t a, uint8_t v) {
   if (a == 0xff4d) {
     if (g->model == GB_MODEL_CGB)
       g->key1 = (uint8_t)((g->key1 & 0x80) | (v & 1));
+    return;
+  }
+  if (a == 0xff6c) {
+    if (g->model == GB_MODEL_CGB)
+      g->opri = v & 1;
     return;
   }
   if (a >= 0xff51 && a <= 0xff54) {
@@ -707,14 +714,26 @@ static void ppu_line(gb_t *g, unsigned y) {
     }
     uint8_t p = (lcdc & 1) ? tile_pixel(g, tile, row, col,
                                          g->model == GB_MODEL_CGB ? (attr >> 3) & 1 : 0) : 0;
-    g->bg_line[x] = p;
+    g->bg_line[x] = (uint8_t)(p | ((attr & 0x80) ? 0x80 : 0));
     g->fb[y * 160 + x] = g->model == GB_MODEL_CGB
                               ? cgb_color(g->bg_palette, (attr & 7) * 4 + p)
                               : color[(pal >> (p * 2)) & 3];
   }
   if ((lcdc & 2) && (lcdc & 0x80)) {
     unsigned height = (lcdc & 4) ? 16 : 8, drawn = 0;
-    for (unsigned i = 0; i < 40 && drawn < 10; i++) {
+    bool used[40] = {false};
+    while (drawn < 10) {
+      unsigned i = 40, best = 256;
+      for (unsigned j = 0; j < 40; j++) {
+        int line = (int)y - g->oam[j * 4] + 16;
+        if (used[j] || line < 0 || line >= (int)height) continue;
+        if (i == 40 || (g->opri && g->oam[j * 4 + 1] < best)) {
+          i = j;
+          best = g->oam[j * 4 + 1];
+        }
+      }
+      if (i == 40) break;
+      used[i] = true;
       uint8_t sy = g->oam[i * 4], sx = g->oam[i * 4 + 1], t = g->oam[i * 4 + 2], a = g->oam[i * 4 + 3];
       int line = (int)y - sy + 16;
       if (line < 0 || line >= (int)height) continue;
@@ -727,7 +746,8 @@ static void ppu_line(gb_t *g, unsigned y) {
         if (xx < 0 || xx >= 160) continue;
         uint8_t p = tile_pixel(g, t + (line >= 8), (unsigned)line & 7, tile_col,
                                g->model == GB_MODEL_CGB && (a & 8) ? 1 : 0);
-        if (!p || ((a & 0x80) && g->bg_line[xx])) continue;
+        if (!p || ((a & 0x80) && (g->bg_line[xx] & 0x0f))) continue;
+        if (g->model == GB_MODEL_CGB && (g->bg_line[xx] & 0x80)) continue;
         uint8_t pal = a & 0x10 ? g->mem[0xff49] : g->mem[0xff48];
         g->fb[y * 160 + xx] = g->model == GB_MODEL_CGB
                                   ? cgb_color(g->obj_palette, (a & 7) * 4 + p)
@@ -1159,7 +1179,7 @@ int gb_load_ram(gb_t *g, const uint8_t *data, size_t n) {
 }
 size_t gb_save_state_size(const gb_t *g) {
   return g ? STATE_HEADER_SIZE + 0x10000u + sizeof g->vram + sizeof g->wram +
-                      0xa0u + sizeof g->fb + sizeof g->bg_line + 220u + g->ram_size
+                      0xa0u + sizeof g->fb + sizeof g->bg_line + 221u + g->ram_size
            : 0;
 }
 size_t gb_save_state(const gb_t *g, uint8_t *out) {
@@ -1225,6 +1245,7 @@ size_t gb_save_state(const gb_t *g, uint8_t *out) {
   p += sizeof g->rtc_latched;
   put32(&p, (uint32_t)g->model);
   *p++ = g->key1;
+  *p++ = g->opri;
   put16(&p, g->hdma_source);
   put16(&p, g->hdma_dest);
   *p++ = g->hdma5;
@@ -1302,6 +1323,7 @@ int gb_load_state(gb_t *g, const uint8_t *data, size_t n) {
   p += sizeof g->rtc_latched;
   g->model = (gb_model_t)get32(&p);
   g->key1 = *p++;
+  g->opri = *p++;
   g->hdma_source = get16(&p);
   g->hdma_dest = get16(&p);
   g->hdma5 = *p++;
@@ -1342,6 +1364,7 @@ void gb_reset(gb_t *g) {
   g->hdma_source = g->hdma_dest = 0;
   g->hdma5 = 0xff;
   g->key1 = 0;
+  g->opri = 0;
   g->mem[0xff04] = 0;
   g->mem[0xff05] = 0;
   g->mem[0xff06] = 0;

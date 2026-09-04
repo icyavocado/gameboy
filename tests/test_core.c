@@ -385,6 +385,39 @@ UTEST(ppu, cgb_tile_attributes_and_palette) {
   gb_destroy(g);
 }
 
+UTEST(ppu, cgb_bg_priority_and_opri) {
+  static uint8_t rom[0x8000];
+  memset(rom, 0, sizeof rom);
+  rom[0x143] = 0xc0;
+  gb_t *g = gb_create();
+  ASSERT_EQ(gb_load_rom(g, rom, sizeof rom), 0);
+  gb_dbg_write(g, 0x8010, 0x80);
+  gb_dbg_write(g, 0x8011, 0x00);
+  gb_dbg_write(g, 0x8020, 0x80);
+  gb_dbg_write(g, 0x8021, 0x00);
+  gb_dbg_write(g, 0x9800, 1);
+  gb_dbg_write(g, 0xfe00, 16);
+  gb_dbg_write(g, 0xfe01, 8);
+  gb_dbg_write(g, 0xfe02, 2);
+  gb_dbg_write(g, 0xff26, 0x80);
+  gb_dbg_write(g, 0xff40, 0x93);
+  gb_dbg_write(g, 0xff68, 0x02);
+  gb_dbg_write(g, 0xff69, 0x1f);
+  gb_dbg_write(g, 0xff69, 0x00);
+  gb_dbg_write(g, 0xff6a, 0x00);
+  gb_dbg_write(g, 0xff6b, 0x1f);
+  gb_dbg_write(g, 0xff6b, 0x00);
+  gb_dbg_write(g, 0xff4f, 1);
+  gb_dbg_write(g, 0x9800, 0x80);
+  gb_dbg_write(g, 0xff4f, 0);
+  gb_run_frame(g);
+  ASSERT_EQ(gb_framebuffer(g)[0], 0xff000000);
+  ASSERT_EQ(gb_dbg_read(g, 0xff6c), 0xfe);
+  gb_dbg_write(g, 0xff6c, 1);
+  ASSERT_EQ(gb_dbg_read(g, 0xff6c), 0xff);
+  gb_destroy(g);
+}
+
 UTEST(ppu, background_tile) {
   gb_t *g = load((const uint8_t[]){0x76}, 1);
   gb_dbg_write(g, 0x8010, 0x80);
@@ -592,6 +625,7 @@ int main(void) {
   core_cgb_hblank_dma();
   core_cgb_speed_switch();
   ppu_cgb_tile_attributes_and_palette();
+  ppu_cgb_bg_priority_and_opri();
   ppu_background_tile();
   ppu_lcd_timing_and_interrupts();
   ppu_sprite_rendering();
