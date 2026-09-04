@@ -1,5 +1,6 @@
 #include "gb.h"
 #include <SDL.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -49,6 +50,11 @@ static void save_state(const gb_t *gb, const char *path, uint8_t *buffer,
     write_file(path, buffer, size);
 }
 
+static void audio(void *user, const int16_t *stereo, size_t frames) {
+  SDL_AudioDeviceID device = *(SDL_AudioDeviceID *)user;
+  SDL_QueueAudio(device, stereo, (uint32_t)(frames * 2 * sizeof *stereo));
+}
+
 int main(int argc, char **argv) {
   int debug = argc == 3 && strcmp(argv[1], "--debug") == 0;
   const char *path = debug ? argv[2] : argc == 2 ? argv[1] : NULL;
@@ -59,6 +65,7 @@ int main(int argc, char **argv) {
   SDL_Window *window = NULL;
   SDL_Renderer *renderer = NULL;
   SDL_Texture *texture = NULL;
+  SDL_AudioDeviceID audio_device = 0;
   int running = 1, paused = debug;
 
   if (!path) {
@@ -96,7 +103,7 @@ int main(int argc, char **argv) {
       gb_load_state(gb, file, file_size);
     free(file);
   }
-  if (SDL_Init(SDL_INIT_VIDEO | SDL_INIT_EVENTS)) {
+  if (SDL_Init(SDL_INIT_VIDEO | SDL_INIT_EVENTS | SDL_INIT_AUDIO)) {
     free(state);
     gb_destroy(gb);
     return 1;
@@ -114,6 +121,16 @@ int main(int argc, char **argv) {
     free(state);
     gb_destroy(gb);
     return 1;
+  }
+  SDL_AudioSpec want = {0};
+  want.freq = 44100;
+  want.format = AUDIO_S16SYS;
+  want.channels = 2;
+  want.samples = 1024;
+  audio_device = SDL_OpenAudioDevice(NULL, 0, &want, NULL, 0);
+  if (audio_device) {
+    gb_set_audio_callback(gb, audio, &audio_device);
+    SDL_PauseAudioDevice(audio_device, 0);
   }
 #ifdef GB_ENABLE_TUI
   if (debug) {
@@ -172,6 +189,8 @@ int main(int argc, char **argv) {
     endwin();
 #endif
   save_ram(gb, save_path);
+  if (audio_device)
+    SDL_CloseAudioDevice(audio_device);
   SDL_DestroyTexture(texture);
   SDL_DestroyRenderer(renderer);
   SDL_DestroyWindow(window);
