@@ -5,11 +5,14 @@
 /* Invalid SM83 opcodes are intentionally treated as NOPs in Phase 1. */
 struct gb {
   uint8_t *rom, *ram, mem[65536];
+  uint8_t vram[0x2000], oam[0xa0];
   size_t rom_size, ram_size;
   uint32_t fb[160 * 144];
+  uint8_t bg_line[160];
   uint16_t af, bc, de, hl, sp, pc, timer;
   uint8_t ime, ei_delay, halted, halt_bug, input, div, mbc, rom_bank, ram_bank,
-      ram_enable, upper, mode;
+      ram_enable, upper, mode, ppu_mode, stat_signal;
+  unsigned ppu_cycles;
   gb_model_t model;
   gb_serial_cb serial;
   void *serial_user;
@@ -27,6 +30,7 @@ static void fs(gb_t *g, unsigned z, unsigned n, unsigned h, unsigned c) {
 }
 static uint8_t rd(const gb_t *, uint16_t);
 static void wr(gb_t *, uint16_t, uint8_t);
+static void ppu_tick(gb_t *);
 static uint8_t *rp8(gb_t *g, unsigned n) {
   switch (n) {
   case 0:
@@ -101,12 +105,34 @@ static uint8_t jp(const gb_t *g) {
 static uint8_t rd(const gb_t *g, uint16_t a) {
   if (a < 0x8000 && g->rom)
     return g->rom[rb(g, a)];
+  if (a >= 0xe000 && a < 0xfe00)
+    a = (uint16_t)(a - 0x2000);
+  if (a >= 0x8000 && a < 0xa000)
+    return g->vram[a - 0x8000];
+  if (a >= 0xfe00 && a < 0xff00)
+    return a < 0xfea0 ? g->oam[a - 0xfe00] : 0xff;
+  if (a == 0xff44)
+    return g->mem[a];
+  if (a == 0xff41)
+    return (uint8_t)(g->mem[a] | 0x80 | (g->mem[0xff45] == g->mem[0xff44] ? 4 : 0) |
+                     g->ppu_mode);
   if (a >= 0xa000 && a < 0xc000 && g->ram && g->ram_enable)
     return g->ram[((size_t)(g->mode ? g->ram_bank : 0) * 0x2000 + a - 0xa000) %
                   g->ram_size];
   return a == 0xff00 ? jp(g) : g->mem[a];
 }
 static void wr(gb_t *g, uint16_t a, uint8_t v) {
+  if (a >= 0xe000 && a < 0xfe00)
+    a = (uint16_t)(a - 0x2000);
+  if (a >= 0x8000 && a < 0xa000) {
+    g->vram[a - 0x8000] = v;
+    return;
+  }
+  if (a >= 0xfe00 && a < 0xff00) {
+    if (a < 0xfea0)
+      g->oam[a - 0xfe00] = v;
+    return;
+  }
   if (g->mbc && a < 0x2000) {
     g->ram_enable = (v & 15) == 10;
     return;
@@ -144,6 +170,26 @@ static void wr(gb_t *g, uint16_t a, uint8_t v) {
     g->mem[a] = 0;
     g->div = 0;
     g->timer = 0;
+    return;
+  }
+  if (a == 0xff41) {
+    g->mem[a] = (uint8_t)((g->mem[a] & 7) | (v & 0x78));
+    return;
+  }
+  if (a == 0xff44)
+    return;
+  if (a == 0xff40) {
+    uint8_t old = g->mem[a];
+    g->mem[a] = v;
+    if (!(v & 0x80)) {
+      g->ppu_mode = 0;
+      g->ppu_cycles = 0;
+      g->mem[0xff44] = 0;
+    } else if (!(old & 0x80)) {
+      g->ppu_mode = 2;
+      g->ppu_cycles = 0;
+      g->mem[0xff44] = 0;
+    }
     return;
   }
   if (a == 0xff02 && (v & 0x80) && g->serial) {
@@ -259,6 +305,85 @@ static int cb(gb_t *g, uint8_t o) {
   sr(g, n, r);
   return n == 6 ? 16 : 8;
 }
+static uint8_t tile_pixel(const gb_t *g, int tile, unsigned row, unsigned col) {
+  size_t a = (size_t)((tile & 255) * 16 + row * 2);
+  uint8_t lo = g->vram[a & 0x1fff], hi = g->vram[(a + 1) & 0x1fff];
+  return (uint8_t)(((hi >> (7 - col)) & 1) * 2 + ((lo >> (7 - col)) & 1));
+}
+static void ppu_line(gb_t *g, unsigned y) {
+  static const uint32_t color[] = {0xfff8f8f8, 0xffa8a8a8, 0xff585858, 0xff101010};
+  uint8_t lcdc = g->mem[0xff40], scx = g->mem[0xff43], scy = g->mem[0xff42];
+  uint8_t wy = g->mem[0xff4a], wx = g->mem[0xff4b];
+  unsigned window = (lcdc & 0x20) && y >= wy;
+  for (unsigned x = 0; x < 160; x++) {
+    unsigned px = x + scx, py = y + scy;
+    if (window && x + 7 >= wx) {
+      px = x + 7 - wx;
+      py = y - wy;
+    }
+    unsigned map = window ? ((lcdc & 0x40) ? 0x1c00 : 0x1800)
+                          : ((lcdc & 8) ? 0x1c00 : 0x1800);
+    unsigned tx = (px >> 3) & 31, ty = (py >> 3) & 31;
+    uint8_t t = g->vram[map + ty * 32 + tx], pal = g->mem[0xff47];
+    int tile = (lcdc & 0x10) ? t : (int8_t)t + 256;
+    uint8_t p = (lcdc & 1) ? tile_pixel(g, tile, py & 7, px & 7) : 0;
+    g->bg_line[x] = p;
+    g->fb[y * 160 + x] = color[(pal >> (p * 2)) & 3];
+  }
+  if ((lcdc & 2) && (lcdc & 0x80)) {
+    unsigned height = (lcdc & 4) ? 16 : 8, drawn = 0;
+    for (unsigned i = 0; i < 40 && drawn < 10; i++) {
+      uint8_t sy = g->oam[i * 4], sx = g->oam[i * 4 + 1], t = g->oam[i * 4 + 2], a = g->oam[i * 4 + 3];
+      int line = (int)y - sy + 16;
+      if (line < 0 || line >= (int)height) continue;
+      drawn++;
+      if (a & 0x40) line = (int)height - 1 - line;
+      if (height == 16) t &= 0xfe;
+      for (unsigned col = 0; col < 8; col++) {
+        unsigned tile_col = a & 0x20 ? 7 - col : col;
+        int xx = (int)sx - 8 + (int)col;
+        if (xx < 0 || xx >= 160) continue;
+        uint8_t p = tile_pixel(g, t + (line >= 8), (unsigned)line & 7, tile_col);
+        if (!p || ((a & 0x80) && g->bg_line[xx])) continue;
+        uint8_t pal = a & 0x10 ? g->mem[0xff49] : g->mem[0xff48];
+        g->fb[y * 160 + xx] = color[(pal >> (p * 2)) & 3];
+      }
+    }
+  }
+}
+static void ppu_stat(gb_t *g) {
+  uint8_t lyc = g->mem[0xff45], stat = g->mem[0xff41];
+  unsigned signal = ((g->ppu_mode == 0) && (stat & 8)) ||
+                    ((g->ppu_mode == 1) && (stat & 16)) ||
+                    ((g->ppu_mode == 2) && (stat & 32)) ||
+                    (lyc == g->mem[0xff44] && (stat & 64));
+  if (signal && !g->stat_signal) g->mem[0xff0f] |= 2;
+  g->stat_signal = (uint8_t)signal;
+}
+static void ppu_tick(gb_t *g) {
+  if (!(g->mem[0xff40] & 0x80)) return;
+  if (++g->ppu_cycles < (g->ppu_mode == 2 ? 80 : g->ppu_mode == 3 ? 172 :
+                         g->ppu_mode == 1 ? 456 : 204)) return;
+  g->ppu_cycles = 0;
+  if (g->ppu_mode == 2) g->ppu_mode = 3;
+  else if (g->ppu_mode == 3) {
+    ppu_line(g, g->mem[0xff44]);
+    g->ppu_mode = 0;
+  } else if (g->ppu_mode == 0) {
+    g->mem[0xff44]++;
+    if (g->mem[0xff44] == 144) {
+      g->ppu_mode = 1;
+      g->mem[0xff0f] |= 1;
+    } else g->ppu_mode = 2;
+  } else {
+    g->mem[0xff44]++;
+    if (g->mem[0xff44] >= 154) {
+      g->mem[0xff44] = 0;
+      g->ppu_mode = 2;
+    }
+  }
+  ppu_stat(g);
+}
 static void tick(gb_t *g, unsigned n) {
   while (n--) {
     if (++g->div == 0)
@@ -273,6 +398,7 @@ static void tick(gb_t *g, unsigned n) {
         }
       }
     }
+    ppu_tick(g);
   }
 }
 static int irq(gb_t *g) {
@@ -477,17 +603,10 @@ done:
   tick(g, (unsigned)c);
   return c;
 }
-static void line(gb_t *g, unsigned y) {
-  static const uint32_t p[] = {0xfff8f8f8, 0xffa8a8a8, 0xff585858, 0xff101010};
-  for (unsigned x = 0; x < 160; x++)
-    g->fb[y * 160 + x] = p[(g->mem[0xff47] >> ((x & 3) * 2)) & 3];
-}
 void gb_run_frame(gb_t *g) {
   unsigned n = 0;
   while (n < 70224)
     n += (unsigned)gb_dbg_step(g);
-  for (unsigned y = 0; y < 144; y++)
-    line(g, y);
 }
 gb_t *gb_create(void) {
   gb_t *g = calloc(1, sizeof(*g));
@@ -535,9 +654,20 @@ void gb_reset(gb_t *g) {
   g->ime = g->halted = g->halt_bug = g->ei_delay = 0;
   g->rom_bank = 1;
   g->ram_bank = g->upper = g->mode = 0;
+  g->div = g->timer = 0;
+  g->ppu_cycles = 0;
+  g->ppu_mode = 2;
+  g->stat_signal = 0;
+  g->mem[0xff04] = 0;
+  g->mem[0xff05] = 0;
+  g->mem[0xff06] = 0;
+  g->mem[0xff07] = 0;
+  g->mem[0xff0f] = 0;
+  g->mem[0xffff] = 0;
   g->mem[0xff40] = 0x91;
   g->mem[0xff47] = 0xe4;
   g->mem[0xff00] = 0xcf;
+  g->mem[0xff44] = 0;
 }
 const uint32_t *gb_framebuffer(const gb_t *g) { return g->fb; }
 void gb_set_input(gb_t *g, uint8_t v) { g->input = v; }
