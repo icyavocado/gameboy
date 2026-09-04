@@ -163,6 +163,47 @@ UTEST(core, mbc1_bank_switching) {
   gb_destroy(g);
 }
 
+UTEST(core, mbc3_and_mbc5_bank_switching) {
+  static uint8_t rom[0x800000];
+  memset(rom, 0, sizeof rom);
+  rom[0x147] = 0x13;
+  rom[0x149] = 3;
+  rom[0x4000] = 1;
+  rom[0x8000] = 2;
+  rom[0xc000] = 3;
+  gb_t *g = gb_create();
+  ASSERT_EQ(gb_load_rom(g, rom, sizeof rom), 0);
+  ASSERT_EQ(gb_dbg_read(g, 0x4000), 1);
+  gb_dbg_write(g, 0x2000, 3);
+  ASSERT_EQ(gb_dbg_read(g, 0x4000), 3);
+  gb_dbg_write(g, 0x0000, 0x0a);
+  gb_dbg_write(g, 0x4000, 8);
+  gb_dbg_write(g, 0xa000, 30);
+  gb_dbg_write(g, 0x6000, 0);
+  gb_dbg_write(g, 0x6000, 1);
+  ASSERT_EQ(gb_dbg_read(g, 0xa000), 30);
+  gb_destroy(g);
+
+  memset(rom, 0, sizeof rom);
+  rom[0x147] = 0x1b;
+  rom[0x149] = 3;
+  rom[0x4000] = 1;
+  rom[0x410000] = 4;
+  g = gb_create();
+  ASSERT_EQ(gb_load_rom(g, rom, sizeof rom), 0);
+  gb_dbg_write(g, 0x0000, 0x0a);
+  gb_dbg_write(g, 0x2000, 0);
+  ASSERT_EQ(gb_dbg_read(g, 0x4000), 0);
+  gb_dbg_write(g, 0x2000, 4);
+  gb_dbg_write(g, 0x3000, 1);
+  ASSERT_EQ(gb_dbg_read(g, 0x4000), 4);
+  gb_dbg_write(g, 0x4000, 1);
+  gb_dbg_write(g, 0xa000, 0xa5);
+  gb_dbg_write(g, 0x4000, 0);
+  ASSERT_EQ(gb_dbg_read(g, 0xa000), 0);
+  gb_destroy(g);
+}
+
 UTEST(core, wram_echo) {
   gb_t *g = load((const uint8_t[]){0x00}, 1);
   gb_dbg_write(g, 0xc123, 0x5a);
@@ -324,6 +365,7 @@ int main(void) {
   core_timer_overflow_and_reset_state();
   core_joyp_selection_and_serial_callback();
   core_mbc1_bank_switching();
+  core_mbc3_and_mbc5_bank_switching();
   core_wram_echo();
   ppu_background_tile();
   ppu_lcd_timing_and_interrupts();
@@ -335,6 +377,6 @@ int main(void) {
   core_oam_dma_transfer();
   core_timer_uses_divider_edges();
   ppu_stat_write_rechecks_coincidence();
-  puts("19 tests passed");
+  puts("20 tests passed");
   return 0;
 }

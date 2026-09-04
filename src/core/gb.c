@@ -3,7 +3,7 @@
 #include <string.h>
 
 /* Invalid SM83 opcodes are intentionally treated as NOPs in Phase 1. */
-#define STATE_VERSION 2u
+#define STATE_VERSION 3u
 #define STATE_HEADER_SIZE 24u
 struct gb {
   uint8_t *rom, *ram, mem[65536];
@@ -12,9 +12,11 @@ struct gb {
   uint32_t fb[160 * 144];
   uint8_t bg_line[160];
   uint16_t af, bc, de, hl, sp, pc, timer, divider;
-  uint8_t ime, ei_delay, halted, halt_bug, input, div, mbc, battery, rom_bank,
-      ram_bank, ram_enable, upper, mode, ppu_mode, stat_signal, dma_page,
-      dma_index, dma_active, timer_signal;
+  uint8_t ime, ei_delay, halted, halt_bug, input, div, mbc, battery, ram_bank,
+      ram_enable, upper, mode, ppu_mode, stat_signal, dma_page, dma_index,
+      dma_active, timer_signal, rtc_select, rtc_latched_valid, rtc[5],
+      rtc_latched[5];
+  uint16_t rom_bank;
   unsigned ppu_cycles;
   unsigned dma_cycles;
   gb_model_t model;
@@ -149,7 +151,7 @@ static size_t rb(const gb_t *g, uint16_t a) {
   unsigned b = a < 0x4000 ? 0 : g->rom_bank;
   if (!banks)
     banks = 1;
-  if (g->mbc && a < 0x4000 && !g->mode)
+  if (g->mbc == 1 && a < 0x4000 && !g->mode)
     b = g->upper << 5;
   return ((size_t)(b % banks) * 0x4000 + (a & 0x3fff)) % g->rom_size;
 }
@@ -175,9 +177,13 @@ static uint8_t rd(const gb_t *g, uint16_t a) {
   if (a == 0xff41)
     return (uint8_t)(g->mem[a] | 0x80 | (g->mem[0xff45] == g->mem[0xff44] ? 4 : 0) |
                      g->ppu_mode);
-  if (a >= 0xa000 && a < 0xc000 && g->ram && g->ram_enable)
-    return g->ram[((size_t)(g->mode ? g->ram_bank : 0) * 0x2000 + a - 0xa000) %
-                  g->ram_size];
+  if (a >= 0xa000 && a < 0xc000 && g->ram && g->ram_enable) {
+    if (g->mbc == 3 && g->rtc_select >= 8 && g->rtc_select <= 12)
+      return g->rtc_latched[g->rtc_select - 8];
+    return g->ram[((size_t)(g->mbc == 1 && g->mode ? g->ram_bank :
+                             g->mbc == 5 ? g->ram_bank : 0) *
+                    0x2000 + a - 0xa000) % g->ram_size];
+  }
   return a == 0xff00 ? jp(g) : g->mem[a];
 }
 static void wr(gb_t *g, uint16_t a, uint8_t v) {
@@ -196,14 +202,37 @@ static void wr(gb_t *g, uint16_t a, uint8_t v) {
     g->ram_enable = (v & 15) == 10;
     return;
   }
-  if (g->mbc && a < 0x4000) {
+  if (g->mbc == 1 && a < 0x4000) {
     g->rom_bank = v & 31;
     if (!g->rom_bank)
       g->rom_bank = 1;
     g->rom_bank |= g->upper << 5;
     return;
   }
-  if (g->mbc && a < 0x6000) {
+  if (g->mbc == 3 && a < 0x4000) {
+    g->rom_bank = v & 127;
+    if (!g->rom_bank)
+      g->rom_bank = 1;
+    return;
+  }
+  if (g->mbc == 5 && a < 0x3000) {
+    g->rom_bank = (uint16_t)((g->rom_bank & 0x100) | v);
+    return;
+  }
+  if (g->mbc == 5 && a < 0x4000) {
+    g->rom_bank = (uint16_t)((g->rom_bank & 0xff) | ((v & 1) << 8));
+    return;
+  }
+  if (g->mbc == 3 && a < 0x6000) {
+    g->ram_bank = v;
+    g->rtc_select = v;
+    return;
+  }
+  if (g->mbc == 5 && a < 0x6000) {
+    g->ram_bank = v & 15;
+    return;
+  }
+  if (g->mbc == 1 && a < 0x6000) {
     if (g->mode)
       g->ram_bank = v & 3;
     else {
@@ -212,13 +241,24 @@ static void wr(gb_t *g, uint16_t a, uint8_t v) {
     }
     return;
   }
-  if (g->mbc && a < 0x8000) {
+  if (g->mbc == 3 && a < 0x8000) {
+    if (v == 1 && g->rtc_latched_valid == 0)
+      memcpy(g->rtc_latched, g->rtc, sizeof g->rtc);
+    g->rtc_latched_valid = v == 1;
+    return;
+  }
+  if (g->mbc == 1 && a < 0x8000) {
     g->mode = v & 1;
     return;
   }
   if (a >= 0xa000 && a < 0xc000 && g->ram && g->ram_enable) {
-    g->ram[((size_t)(g->mode ? g->ram_bank : 0) * 0x2000 + a - 0xa000) %
-           g->ram_size] = v;
+    if (g->mbc == 3 && g->rtc_select >= 8 && g->rtc_select <= 12) {
+      g->rtc[g->rtc_select - 8] = v;
+      return;
+    }
+    g->ram[((size_t)(g->mbc == 1 && g->mode ? g->ram_bank :
+                     g->mbc == 5 ? g->ram_bank : 0) *
+             0x2000 + a - 0xa000) % g->ram_size] = v;
     return;
   }
   if (a == 0xff00) {
@@ -825,7 +865,11 @@ int gb_load_rom(gb_t *g, const uint8_t *r, size_t n) {
     return -1;
   memcpy(g->rom, r, n);
   g->rom_size = n;
-  g->mbc = r[0x147] >= 1 && r[0x147] <= 3;
+  g->mbc = r[0x147] == 1 || r[0x147] == 2 || r[0x147] == 3
+               ? 1
+               : r[0x147] >= 0x0f && r[0x147] <= 0x13 ? 3
+               : r[0x147] >= 0x19 && r[0x147] <= 0x1e ? 5
+                                                       : 0;
   g->battery = (uint8_t)has_battery(r[0x147]);
   g->ram_size = ramsize(r[0x149]);
   g->ram = g->ram_size ? calloc(1, g->ram_size) : NULL;
@@ -852,7 +896,7 @@ int gb_load_ram(gb_t *g, const uint8_t *data, size_t n) {
 }
 size_t gb_save_state_size(const gb_t *g) {
   return g ? STATE_HEADER_SIZE + 0x10000u + 0x2000u + 0xa0u +
-                   sizeof g->fb + sizeof g->bg_line + 47u + g->ram_size
+                   sizeof g->fb + sizeof g->bg_line + 59u + g->ram_size
            : 0;
 }
 size_t gb_save_state(const gb_t *g, uint8_t *out) {
@@ -904,6 +948,12 @@ size_t gb_save_state(const gb_t *g, uint8_t *out) {
   put32(&p, g->dma_cycles);
   put16(&p, g->divider);
   *p++ = g->timer_signal;
+  *p++ = g->rtc_select;
+  *p++ = g->rtc_latched_valid;
+  memcpy(p, g->rtc, sizeof g->rtc);
+  p += sizeof g->rtc;
+  memcpy(p, g->rtc_latched, sizeof g->rtc_latched);
+  p += sizeof g->rtc_latched;
   put32(&p, (uint32_t)g->model);
   if (g->ram_size)
     memcpy(p, g->ram, g->ram_size);
@@ -956,6 +1006,12 @@ int gb_load_state(gb_t *g, const uint8_t *data, size_t n) {
   g->dma_cycles = get32(&p);
   g->divider = get16(&p);
   g->timer_signal = *p++;
+  g->rtc_select = *p++;
+  g->rtc_latched_valid = *p++;
+  memcpy(g->rtc, p, sizeof g->rtc);
+  p += sizeof g->rtc;
+  memcpy(g->rtc_latched, p, sizeof g->rtc_latched);
+  p += sizeof g->rtc_latched;
   g->model = (gb_model_t)get32(&p);
   if (g->ram_size)
     memcpy(g->ram, p, g->ram_size);
