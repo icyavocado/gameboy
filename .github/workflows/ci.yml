@@ -1,0 +1,17 @@
+name: CI
+on: [push, pull_request]
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install dependencies
+        run: sudo apt-get update && sudo apt-get install -y cmake libsdl2-dev libncursesw5-dev
+      - name: Configure
+        run: cmake -S . -B build
+      - name: Fetch test ROMs
+        run: tools/fetch_roms.sh
+      - name: Build
+        run: cmake --build build --parallel
+      - name: Test
+        run: ctest --test-dir build --output-on-failure

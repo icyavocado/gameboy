@@ -1,0 +1,6 @@
+/build*/
+tests/roms/
+*.sav
+*.state
+__pycache__/
+*.pyc
