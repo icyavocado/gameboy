@@ -215,6 +215,36 @@ UTEST(core, mbc3_and_mbc5_bank_switching) {
   gb_destroy(g);
 }
 
+UTEST(core, mbc2_nibble_ram_and_banking) {
+  static uint8_t rom[0x40000];
+  memset(rom, 0, sizeof rom);
+  rom[0x147] = 6;
+  for (unsigned bank = 1; bank < 16; bank++)
+    rom[bank * 0x4000] = (uint8_t)bank;
+  gb_t *g = gb_create();
+  ASSERT_EQ(gb_load_rom(g, rom, sizeof rom), 0);
+  ASSERT_EQ(gb_save_ram_size(g), 0x200);
+  ASSERT_EQ(gb_dbg_read(g, 0x4000), 1);
+  gb_dbg_write(g, 0x2100, 3);
+  ASSERT_EQ(gb_dbg_read(g, 0x4000), 3);
+  gb_dbg_write(g, 0x2000, 0x0a);
+  gb_dbg_write(g, 0xa000, 0xab);
+  gb_dbg_write(g, 0xa1ff, 5);
+  ASSERT_EQ(gb_dbg_read(g, 0xa000), 0xfb);
+  ASSERT_EQ(gb_dbg_read(g, 0xa1ff), 0xf5);
+  ASSERT_EQ(gb_dbg_read(g, 0xa200), 0xff);
+  gb_dbg_write(g, 0x2000, 0);
+  ASSERT_EQ(gb_dbg_read(g, 0xa000), 0xff);
+  gb_destroy(g);
+
+  memset(rom, 0, sizeof rom);
+  rom[0x147] = 5;
+  g = gb_create();
+  ASSERT_EQ(gb_load_rom(g, rom, sizeof rom), 0);
+  ASSERT_EQ(gb_save_ram_size(g), 0);
+  gb_destroy(g);
+}
+
 UTEST(core, wram_echo) {
   gb_t *g = load((const uint8_t[]){0x00}, 1);
   gb_dbg_write(g, 0xc123, 0x5a);
@@ -424,6 +454,7 @@ int main(void) {
   core_joyp_selection_and_serial_callback();
   core_mbc1_bank_switching();
   core_mbc3_and_mbc5_bank_switching();
+  core_mbc2_nibble_ram_and_banking();
   core_wram_echo();
   ppu_background_tile();
   ppu_lcd_timing_and_interrupts();

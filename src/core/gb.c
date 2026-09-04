@@ -208,8 +208,8 @@ static size_t ramsize(uint8_t c) {
   return c < 6 ? n[c] : 0;
 }
 static int has_battery(uint8_t type) {
-  return type == 3 || type == 9 || (type >= 0x0f && type <= 0x13) ||
-         (type >= 0x1b && type <= 0x1e);
+  return type == 3 || type == 6 || type == 9 || (type >= 0x0f && type <= 0x13) ||
+          (type >= 0x1b && type <= 0x1e);
 }
 static void put16(uint8_t **p, uint16_t v) {
   (*p)[0] = (uint8_t)v;
@@ -260,6 +260,10 @@ static uint8_t rd(const gb_t *g, uint16_t a) {
   if (a == 0xff41)
     return (uint8_t)(g->mem[a] | 0x80 | (g->mem[0xff45] == g->mem[0xff44] ? 4 : 0) |
                      g->ppu_mode);
+  if (a >= 0xa000 && a < 0xc000 && g->mbc == 2)
+    return g->ram_enable && a < 0xa200
+               ? (uint8_t)(0xf0 | (g->ram[a - 0xa000] & 0x0f))
+               : 0xff;
   if (a >= 0xa000 && a < 0xc000 && g->ram && g->ram_enable) {
     if (g->mbc == 3 && g->rtc_select >= 8 && g->rtc_select <= 12)
       return g->rtc_latched[g->rtc_select - 8];
@@ -281,6 +285,15 @@ static void wr(gb_t *g, uint16_t a, uint8_t v) {
   if (a >= 0xfe00 && a < 0xff00) {
     if (a < 0xfea0)
       g->oam[a - 0xfe00] = v;
+    return;
+  }
+  if (g->mbc == 2 && a < 0x4000) {
+    if (a & 0x100)
+      g->rom_bank = (uint16_t)(v & 0x0f);
+    else
+      g->ram_enable = (v & 0x0f) == 0x0a;
+    if (!g->rom_bank)
+      g->rom_bank = 1;
     return;
   }
   if (g->mbc && a < 0x2000) {
@@ -337,6 +350,11 @@ static void wr(gb_t *g, uint16_t a, uint8_t v) {
     return;
   }
   if (a >= 0xa000 && a < 0xc000 && g->ram && g->ram_enable) {
+    if (g->mbc == 2) {
+      if (a < 0xa200)
+        g->ram[a - 0xa000] = v & 0x0f;
+      return;
+    }
     if (g->mbc == 3 && g->rtc_select >= 8 && g->rtc_select <= 12) {
       g->rtc[g->rtc_select - 8] = v;
       return;
@@ -970,13 +988,15 @@ int gb_load_rom(gb_t *g, const uint8_t *r, size_t n) {
     return -1;
   memcpy(g->rom, r, n);
   g->rom_size = n;
-  g->mbc = r[0x147] == 1 || r[0x147] == 2 || r[0x147] == 3
-               ? 1
+  g->mbc = r[0x147] == 5 || r[0x147] == 6
+               ? 2
+               : r[0x147] == 1 || r[0x147] == 2 || r[0x147] == 3
+                ? 1
                : r[0x147] >= 0x0f && r[0x147] <= 0x13 ? 3
                : r[0x147] >= 0x19 && r[0x147] <= 0x1e ? 5
                                                        : 0;
   g->battery = (uint8_t)has_battery(r[0x147]);
-  g->ram_size = ramsize(r[0x149]);
+  g->ram_size = g->mbc == 2 ? 0x200 : ramsize(r[0x149]);
   g->ram = g->ram_size ? calloc(1, g->ram_size) : NULL;
   if (g->ram_size && !g->ram)
     return -1;
