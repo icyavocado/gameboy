@@ -93,21 +93,21 @@ static void draw_button(SDL_Renderer *renderer, SDL_Rect rect, int pressed) {
 static void draw_controller(SDL_Renderer *renderer, uint8_t buttons) {
   SDL_Rect rect;
   SDL_SetRenderDrawBlendMode(renderer, SDL_BLENDMODE_BLEND);
-  rect = (SDL_Rect){64, 448, 32, 32};
+  rect = (SDL_Rect){64, 624, 32, 32};
   draw_button(renderer, rect, buttons & (1 << 2));
-  rect = (SDL_Rect){64, 512, 32, 32};
+  rect = (SDL_Rect){64, 688, 32, 32};
   draw_button(renderer, rect, buttons & (1 << 3));
-  rect = (SDL_Rect){32, 480, 32, 32};
+  rect = (SDL_Rect){32, 656, 32, 32};
   draw_button(renderer, rect, buttons & (1 << 1));
-  rect = (SDL_Rect){96, 480, 32, 32};
+  rect = (SDL_Rect){96, 656, 32, 32};
   draw_button(renderer, rect, buttons & (1 << 0));
-  rect = (SDL_Rect){416, 480, 48, 24};
+  rect = (SDL_Rect){416, 656, 48, 24};
   draw_button(renderer, rect, buttons & (1 << 6));
-  rect = (SDL_Rect){480, 480, 48, 24};
+  rect = (SDL_Rect){480, 656, 48, 24};
   draw_button(renderer, rect, buttons & (1 << 7));
-  rect = (SDL_Rect){528, 432, 40, 40};
+  rect = (SDL_Rect){528, 608, 40, 40};
   draw_button(renderer, rect, buttons & (1 << 4));
-  rect = (SDL_Rect){576, 464, 40, 40};
+  rect = (SDL_Rect){576, 640, 40, 40};
   draw_button(renderer, rect, buttons & (1 << 5));
 }
 
@@ -166,7 +166,7 @@ int main(int argc, char **argv) {
     return 1;
   }
   window = SDL_CreateWindow("Game Boy", SDL_WINDOWPOS_CENTERED,
-                            SDL_WINDOWPOS_CENTERED, 640, 576, 0);
+                            SDL_WINDOWPOS_CENTERED, 640, 768, 0);
   renderer = window ? SDL_CreateRenderer(window, -1, SDL_RENDERER_ACCELERATED) : NULL;
   texture = renderer ? SDL_CreateTexture(renderer, SDL_PIXELFORMAT_ABGR8888,
                                          SDL_TEXTUREACCESS_STREAMING, 160, 144)
@@ -246,8 +246,10 @@ int main(int argc, char **argv) {
     if (!paused)
       gb_run_frame(gb);
     SDL_UpdateTexture(texture, NULL, gb_framebuffer(gb), 160 * 4);
+    SDL_SetRenderDrawColor(renderer, 18, 20, 28, 255);
     SDL_RenderClear(renderer);
-    SDL_RenderCopy(renderer, texture, NULL, NULL);
+    SDL_Rect game_rect = {0, 0, 640, 576};
+    SDL_RenderCopy(renderer, texture, NULL, &game_rect);
     draw_controller(renderer, buttons);
     SDL_RenderPresent(renderer);
     SDL_Delay(16);
