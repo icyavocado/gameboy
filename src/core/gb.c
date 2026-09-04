@@ -50,14 +50,21 @@ static unsigned vram_bank(const gb_t *g) { return g->model == GB_MODEL_CGB ? g->
 static unsigned wram_bank(const gb_t *g) {
   return g->model == GB_MODEL_CGB ? (g->svbk & 7 ? g->svbk & 7 : 1) : 1;
 }
+static void cgb_dma_block(gb_t *g) {
+  for (unsigned i = 0; i < 0x10; i++)
+    g->vram[g->vbk & 1][(g->hdma_dest + i) & 0x1fff] =
+        rd(g, (uint16_t)(g->hdma_source + i));
+  g->hdma_source = (uint16_t)(g->hdma_source + 0x10);
+  g->hdma_dest = (uint16_t)(g->hdma_dest + 0x10);
+  if ((g->hdma5 & 0x7f) == 0)
+    g->hdma5 = 0xff;
+  else
+    g->hdma5 = (uint8_t)((g->hdma5 & 0x7f) - 1);
+}
 static void cgb_gdma(gb_t *g, unsigned blocks) {
-  for (unsigned block = 0; block < blocks; block++)
-    for (unsigned i = 0; i < 0x10; i++)
-      g->vram[g->vbk & 1][(g->hdma_dest + block * 0x10 + i) & 0x1fff] =
-          rd(g, (uint16_t)(g->hdma_source + block * 0x10 + i));
-  g->hdma_source = (uint16_t)(g->hdma_source + blocks * 0x10);
-  g->hdma_dest = (uint16_t)(g->hdma_dest + blocks * 0x10);
-  g->hdma5 = 0xff;
+  g->hdma5 = (uint8_t)(blocks - 1);
+  while (g->hdma5 != 0xff)
+    cgb_dma_block(g);
 }
 static uint8_t audio_read(const gb_t *g, uint16_t a) {
   if (a == 0xff26)
@@ -432,9 +439,14 @@ static void wr(gb_t *g, uint16_t a, uint8_t v) {
   }
   if (a == 0xff55) {
     if (v & 0x80) {
-      g->hdma5 = v & 0x7f;
+      if (g->hdma5 != 0xff)
+        g->hdma5 |= 0x80;
+      else
+        g->hdma5 = v & 0x7f;
       return;
     }
+    if (g->hdma5 != 0xff && g->hdma5 & 0x80)
+      return;
     cgb_gdma(g, (v & 0x7f) + 1);
     return;
   }
@@ -735,6 +747,9 @@ static void ppu_tick(gb_t *g) {
   else if (g->ppu_mode == 3) {
     ppu_line(g, g->mem[0xff44]);
     g->ppu_mode = 0;
+    if (g->model == GB_MODEL_CGB && g->mem[0xff44] < 144 &&
+        !(g->hdma5 & 0x80) && g->hdma5 != 0xff)
+      cgb_dma_block(g);
   } else if (g->ppu_mode == 0) {
     g->mem[0xff44]++;
     if (g->mem[0xff44] == 144) {

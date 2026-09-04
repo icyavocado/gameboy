@@ -310,6 +310,31 @@ UTEST(core, cgb_general_dma) {
   gb_destroy(g);
 }
 
+UTEST(core, cgb_hblank_dma) {
+  static uint8_t rom[0x8000];
+  memset(rom, 0, sizeof rom);
+  rom[0x143] = 0xc0;
+  gb_t *g = gb_create();
+  ASSERT_EQ(gb_load_rom(g, rom, sizeof rom), 0);
+  for (unsigned i = 0; i < 0x20; i++)
+    gb_dbg_write(g, (uint16_t)(0xc000 + i), (uint8_t)(0xb0 + i));
+  gb_dbg_write(g, 0xff51, 0xc0);
+  gb_dbg_write(g, 0xff52, 0x00);
+  gb_dbg_write(g, 0xff53, 0x00);
+  gb_dbg_write(g, 0xff54, 0x00);
+  gb_dbg_write(g, 0xff55, 0x82);
+  ASSERT_EQ(gb_dbg_read(g, 0xff55), 2);
+  ASSERT_EQ(gb_dbg_read(g, 0x8000), 0);
+  for (unsigned i = 0; i < 64; i++)
+    gb_dbg_step(g);
+  ASSERT_EQ(gb_dbg_read(g, 0xff55), 1);
+  ASSERT_EQ(gb_dbg_read(g, 0x8000), 0xb0);
+  ASSERT_EQ(gb_dbg_read(g, 0x8010), 0);
+  gb_dbg_write(g, 0xff55, 0x80);
+  ASSERT_EQ(gb_dbg_read(g, 0xff55), 0x81);
+  gb_destroy(g);
+}
+
 UTEST(ppu, cgb_tile_attributes_and_palette) {
   static uint8_t rom[0x8000];
   memset(rom, 0, sizeof rom);
@@ -538,6 +563,7 @@ int main(void) {
   core_wram_echo();
   core_cgb_vram_wram_banking_and_state();
   core_cgb_general_dma();
+  core_cgb_hblank_dma();
   ppu_cgb_tile_attributes_and_palette();
   ppu_background_tile();
   ppu_lcd_timing_and_interrupts();
