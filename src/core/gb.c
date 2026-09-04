@@ -1,4 +1,5 @@
 #include "gb.h"
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -1490,4 +1491,35 @@ void gb_dbg_regs(const gb_t *g, gb_regs_t *o) {
   o->pc = g->pc;
   o->ime = g->ime;
   o->halted = g->halted;
+}
+int gb_dbg_disasm(const gb_t *g, uint16_t a, char *buf, size_t n) {
+  uint8_t op = rd(g, a);
+  unsigned length = 1;
+  char text[32];
+  const char *name;
+  switch (op) {
+  case 0x00: name = "NOP"; break;
+  case 0x76: name = "HALT"; break;
+  case 0x3e: name = "LD A,d8"; length = 2; break;
+  case 0xc3:
+    length = 3;
+    snprintf(text, sizeof text, "JP $%04X", (unsigned)(rd(g, a + 2) << 8 | rd(g, a + 1)));
+    name = text;
+    break;
+  case 0xcd:
+    length = 3;
+    snprintf(text, sizeof text, "CALL $%04X", (unsigned)(rd(g, a + 2) << 8 | rd(g, a + 1)));
+    name = text;
+    break;
+  case 0x18: name = "JR r8"; length = 2; break;
+  case 0x10: name = "STOP"; length = 2; break;
+  case 0xcb: name = "CB"; length = 2; break;
+  default:
+    snprintf(text, sizeof text, "DB $%02X", op);
+    name = text;
+    break;
+  }
+  if (buf && n)
+    snprintf(buf, n, "%s", name);
+  return (int)length;
 }

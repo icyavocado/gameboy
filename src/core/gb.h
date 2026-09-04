@@ -38,5 +38,6 @@ void gb_dbg_enable(gb_t *gb, bool enabled);
 int gb_dbg_run_until_break(gb_t *gb);
 int gb_dbg_add_bp(gb_t *gb, gb_bp_t breakpoint);
 void gb_dbg_del_bp(gb_t *gb, int id);
+int gb_dbg_disasm(const gb_t *gb, uint16_t address, char *buf, size_t size);
 
 #endif

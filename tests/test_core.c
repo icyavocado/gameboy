@@ -141,6 +141,18 @@ UTEST(core, optional_boot_rom_mapping) {
   gb_destroy(g);
 }
 
+UTEST(core, debugger_disassembly) {
+  gb_t *g = load((const uint8_t[]){0x3e, 0x42, 0xc3, 0x00, 0x02, 0xd3}, 6);
+  char text[32];
+  ASSERT_EQ(gb_dbg_disasm(g, 0x100, text, sizeof text), 2);
+  ASSERT_TRUE(strcmp(text, "LD A,d8") == 0);
+  ASSERT_EQ(gb_dbg_disasm(g, 0x102, text, sizeof text), 3);
+  ASSERT_TRUE(strcmp(text, "JP $0200") == 0);
+  ASSERT_EQ(gb_dbg_disasm(g, 0x105, text, sizeof text), 1);
+  ASSERT_TRUE(strcmp(text, "DB $D3") == 0);
+  gb_destroy(g);
+}
+
 UTEST(core, ei_delay_interrupt_and_halt) {
   static const uint8_t code[] = {0xfb, 0x00, 0x76};
   gb_t *g = load(code, sizeof code);
@@ -677,6 +689,7 @@ int main(void) {
   core_cb_bit_rotate_set_res();
   core_jumps_call_ret_and_stack();
   core_debugger_pc_breakpoints();
+  core_debugger_disassembly();
   core_optional_boot_rom_mapping();
   core_ei_delay_interrupt_and_halt();
   core_timer_overflow_and_reset_state();
