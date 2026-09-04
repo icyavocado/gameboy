@@ -982,15 +982,19 @@ int gb_dbg_step(gb_t *g) {
     break;
   case 2:
     wr(g, g->bc, hi(g->af));
+    c = 8;
     break;
   case 0xa:
     g->af = pr(rd(g, g->bc), lo(g->af));
+    c = 8;
     break;
   case 0x12:
     wr(g, g->de, hi(g->af));
+    c = 8;
     break;
   case 0x1a:
     g->af = pr(rd(g, g->de), lo(g->af));
+    c = 8;
     break;
   case 8:
     n = fn(g);
@@ -1000,15 +1004,19 @@ int gb_dbg_step(gb_t *g) {
     break;
   case 0x22:
     wr(g, g->hl++, hi(g->af));
+    c = 8;
     break;
   case 0x2a:
     g->af = pr(rd(g, g->hl++), lo(g->af));
+    c = 8;
     break;
   case 0x32:
     wr(g, g->hl--, hi(g->af));
+    c = 8;
     break;
   case 0x3a:
     g->af = pr(rd(g, g->hl--), lo(g->af));
+    c = 8;
     break;
   case 0x27:
     daa(g);
