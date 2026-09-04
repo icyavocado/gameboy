@@ -17,10 +17,11 @@ struct gb {
       ram_enable, upper, mode, ppu_mode, stat_signal, dma_page, dma_index,
       dma_active, timer_signal, rtc_select, rtc_latched_valid, rtc[5],
       rtc_latched[5], vbk, svbk, bg_palette_index, obj_palette_index, key1, opri,
-      ir;
+      ir, serial_active;
   uint16_t rom_bank;
   uint16_t hdma_source, hdma_dest;
   uint8_t hdma5;
+  uint16_t serial_cycles;
   unsigned ppu_cycles;
   unsigned dma_cycles;
   uint32_t audio_phase[4];
@@ -571,12 +572,9 @@ static void wr(gb_t *g, uint16_t a, uint8_t v) {
     }
     return;
   }
-  if (a == 0xff02 && (v & 0x80) && g->serial) {
-    uint8_t in = 0xff;
-    g->serial(g->serial_user, g->mem[0xff01], &in);
-    g->mem[0xff01] = in;
-    g->mem[0xff0f] |= 8;
-    v &= 0x7f;
+  if (a == 0xff02 && (v & 0x81) == 0x81) {
+    g->serial_active = 1;
+    g->serial_cycles = 0;
   }
   g->mem[a] = v;
 }
@@ -820,6 +818,16 @@ static void tick(gb_t *g, unsigned n) {
       g->oam[g->dma_index] = rd(g, (uint16_t)(g->dma_page * 0x100 + g->dma_index));
       if (++g->dma_index == sizeof g->oam)
         g->dma_active = 0;
+    }
+    if (g->serial_active && ++g->serial_cycles == 4096) {
+      uint8_t in = 0xff;
+      if (g->serial)
+        g->serial(g->serial_user, g->mem[0xff01], &in);
+      g->mem[0xff01] = in;
+      g->mem[0xff02] &= 0x03;
+      g->mem[0xff0f] |= 8;
+      g->serial_active = 0;
+      g->serial_cycles = 0;
     }
   }
 }
@@ -1187,7 +1195,7 @@ int gb_load_ram(gb_t *g, const uint8_t *data, size_t n) {
 }
 size_t gb_save_state_size(const gb_t *g) {
   return g ? STATE_HEADER_SIZE + 0x10000u + sizeof g->vram + sizeof g->wram +
-                      0xa0u + sizeof g->fb + sizeof g->bg_line + 222u + g->ram_size
+                       0xa0u + sizeof g->fb + sizeof g->bg_line + 225u + g->ram_size
            : 0;
 }
 size_t gb_save_state(const gb_t *g, uint8_t *out) {
@@ -1255,6 +1263,8 @@ size_t gb_save_state(const gb_t *g, uint8_t *out) {
   *p++ = g->key1;
   *p++ = g->opri;
   *p++ = g->ir;
+  *p++ = g->serial_active;
+  put16(&p, g->serial_cycles);
   put16(&p, g->hdma_source);
   put16(&p, g->hdma_dest);
   *p++ = g->hdma5;
@@ -1334,6 +1344,8 @@ int gb_load_state(gb_t *g, const uint8_t *data, size_t n) {
   g->key1 = *p++;
   g->opri = *p++;
   g->ir = *p++;
+  g->serial_active = *p++;
+  g->serial_cycles = get16(&p);
   g->hdma_source = get16(&p);
   g->hdma_dest = get16(&p);
   g->hdma5 = *p++;
@@ -1373,6 +1385,8 @@ void gb_reset(gb_t *g) {
   g->svbk = 1;
   g->hdma_source = g->hdma_dest = 0;
   g->hdma5 = 0xff;
+  g->serial_active = 0;
+  g->serial_cycles = 0;
   g->key1 = 0;
   g->opri = 0;
   g->ir = 0;

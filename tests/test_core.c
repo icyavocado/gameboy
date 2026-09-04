@@ -149,9 +149,13 @@ UTEST(core, joyp_selection_and_serial_callback) {
   gb_set_serial_callback(g, serial_callback, NULL);
   gb_dbg_write(g, 0xff01, 'X');
   gb_dbg_write(g, 0xff02, 0x81);
+  ASSERT_EQ(serial_calls, 0);
+  ASSERT_TRUE(gb_dbg_read(g, 0xff02) & 0x80);
+  step(g, 1024);
   ASSERT_EQ(serial_calls, 1);
   ASSERT_EQ(serial_received, 'X');
   ASSERT_EQ(gb_dbg_read(g, 0xff01), 0xa5);
+  ASSERT_EQ(gb_dbg_read(g, 0xff02) & 0x80, 0);
   ASSERT_EQ(gb_dbg_read(g, 0xff0f) & 8, 8);
   gb_destroy(g);
 }
