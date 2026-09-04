@@ -282,6 +282,18 @@ UTEST(core, conditional_relative_and_signed_stack_arithmetic) {
   gb_destroy(g);
 }
 
+UTEST(core, oam_dma_transfer) {
+  gb_t *g = load((const uint8_t[]){0x00}, 1);
+  for (unsigned i = 0; i < 160; i++)
+    gb_dbg_write(g, (uint16_t)(0xc000 + i), (uint8_t)(i ^ 0x5a));
+  gb_dbg_write(g, 0xff46, 0xc0);
+  for (unsigned i = 0; i < 160; i++)
+    ASSERT_EQ(gb_dbg_step(g), 4);
+  for (unsigned i = 0; i < 160; i++)
+    ASSERT_EQ(gb_dbg_read(g, (uint16_t)(0xfe00 + i)), (uint8_t)(i ^ 0x5a));
+  gb_destroy(g);
+}
+
 int main(void) {
   core_immediate_and_register_loads();
   core_alu_flags_and_daa();
@@ -299,6 +311,7 @@ int main(void) {
   core_save_state_round_trip();
   core_extended_control_and_stack_opcodes();
   core_conditional_relative_and_signed_stack_arithmetic();
-  puts("16 tests passed");
+  core_oam_dma_transfer();
+  puts("17 tests passed");
   return 0;
 }

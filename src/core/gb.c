@@ -3,7 +3,7 @@
 #include <string.h>
 
 /* Invalid SM83 opcodes are intentionally treated as NOPs in Phase 1. */
-#define STATE_VERSION 1u
+#define STATE_VERSION 2u
 #define STATE_HEADER_SIZE 24u
 struct gb {
   uint8_t *rom, *ram, mem[65536];
@@ -13,8 +13,10 @@ struct gb {
   uint8_t bg_line[160];
   uint16_t af, bc, de, hl, sp, pc, timer;
   uint8_t ime, ei_delay, halted, halt_bug, input, div, mbc, battery, rom_bank,
-      ram_bank, ram_enable, upper, mode, ppu_mode, stat_signal;
+      ram_bank, ram_enable, upper, mode, ppu_mode, stat_signal, dma_page,
+      dma_index, dma_active;
   unsigned ppu_cycles;
+  unsigned dma_cycles;
   gb_model_t model;
   gb_serial_cb serial;
   void *serial_user;
@@ -227,6 +229,14 @@ static void wr(gb_t *g, uint16_t a, uint8_t v) {
   }
   if (a == 0xff44)
     return;
+  if (a == 0xff46) {
+    g->mem[a] = v;
+    g->dma_page = v;
+    g->dma_index = 0;
+    g->dma_cycles = 0;
+    g->dma_active = 1;
+    return;
+  }
   if (a == 0xff40) {
     uint8_t old = g->mem[a];
     g->mem[a] = v;
@@ -448,6 +458,12 @@ static void tick(gb_t *g, unsigned n) {
       }
     }
     ppu_tick(g);
+    if (g->dma_active && ++g->dma_cycles == 4) {
+      g->dma_cycles = 0;
+      g->oam[g->dma_index] = rd(g, (uint16_t)(g->dma_page * 0x100 + g->dma_index));
+      if (++g->dma_index == sizeof g->oam)
+        g->dma_active = 0;
+    }
   }
 }
 static int irq(gb_t *g) {
@@ -473,6 +489,10 @@ int gb_dbg_step(gb_t *g) {
   if (q) {
     tick(g, q);
     return q;
+  }
+  if (g->dma_active) {
+    tick(g, 4);
+    return 4;
   }
   if (g->halted) {
     tick(g, 4);
@@ -796,7 +816,7 @@ int gb_load_ram(gb_t *g, const uint8_t *data, size_t n) {
 }
 size_t gb_save_state_size(const gb_t *g) {
   return g ? STATE_HEADER_SIZE + 0x10000u + 0x2000u + 0xa0u +
-                   sizeof g->fb + sizeof g->bg_line + 37u + g->ram_size
+                   sizeof g->fb + sizeof g->bg_line + 44u + g->ram_size
            : 0;
 }
 size_t gb_save_state(const gb_t *g, uint8_t *out) {
@@ -840,8 +860,12 @@ size_t gb_save_state(const gb_t *g, uint8_t *out) {
   *p++ = g->mode;
   *p++ = g->ppu_mode;
   *p++ = g->stat_signal;
+  *p++ = g->dma_page;
+  *p++ = g->dma_index;
+  *p++ = g->dma_active;
   put16(&p, g->timer);
   put32(&p, g->ppu_cycles);
+  put32(&p, g->dma_cycles);
   put32(&p, (uint32_t)g->model);
   if (g->ram_size)
     memcpy(p, g->ram, g->ram_size);
@@ -886,8 +910,12 @@ int gb_load_state(gb_t *g, const uint8_t *data, size_t n) {
   g->mode = *p++;
   g->ppu_mode = *p++;
   g->stat_signal = *p++;
+  g->dma_page = *p++;
+  g->dma_index = *p++;
+  g->dma_active = *p++;
   g->timer = get16(&p);
   g->ppu_cycles = get32(&p);
+  g->dma_cycles = get32(&p);
   g->model = (gb_model_t)get32(&p);
   if (g->ram_size)
     memcpy(g->ram, p, g->ram_size);
@@ -908,6 +936,8 @@ void gb_reset(gb_t *g) {
   g->ppu_cycles = 0;
   g->ppu_mode = 2;
   g->stat_signal = 0;
+  g->dma_page = g->dma_index = g->dma_active = 0;
+  g->dma_cycles = 0;
   g->mem[0xff04] = 0;
   g->mem[0xff05] = 0;
   g->mem[0xff06] = 0;
