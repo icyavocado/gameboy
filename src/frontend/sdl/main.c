@@ -52,19 +52,32 @@ static void save_state(const gb_t *gb, const char *path, uint8_t *buffer,
 
 static void audio(void *user, const int16_t *stereo, size_t frames) {
   SDL_AudioDeviceID device = *(SDL_AudioDeviceID *)user;
-  SDL_QueueAudio(device, stereo, (uint32_t)(frames * 2 * sizeof *stereo));
+  const uint32_t bytes = (uint32_t)(frames * 2 * sizeof *stereo);
+
+  if (SDL_GetQueuedAudioSize(device) > bytes * 2)
+    return;
+  SDL_QueueAudio(device, stereo, bytes);
 }
 
 static uint8_t key_button(SDL_Keycode key) {
   switch (key) {
-  case SDLK_RIGHT: return 1 << 0;
-  case SDLK_LEFT: return 1 << 1;
-  case SDLK_UP: return 1 << 2;
-  case SDLK_DOWN: return 1 << 3;
+  case SDLK_RIGHT:
+  case SDLK_d: return 1 << 0;
+  case SDLK_LEFT:
+  case SDLK_a: return 1 << 1;
+  case SDLK_UP:
+  case SDLK_w: return 1 << 2;
+  case SDLK_DOWN:
+  case SDLK_s: return 1 << 3;
   case SDLK_z: return 1 << 4;
   case SDLK_x: return 1 << 5;
+  case SDLK_LSHIFT:
   case SDLK_RSHIFT: return 1 << 6;
-  case SDLK_RETURN: return 1 << 7;
+  case SDLK_TAB: return 1 << 6;
+  case SDLK_BACKSPACE: return 1 << 6;
+  case SDLK_RETURN:
+  case SDLK_KP_ENTER:
+  case SDLK_SPACE: return 1 << 7;
   default: return 0;
   }
 }
@@ -207,7 +220,7 @@ int main(int argc, char **argv) {
     SDL_RenderClear(renderer);
     SDL_RenderCopy(renderer, texture, NULL, NULL);
     SDL_RenderPresent(renderer);
-    SDL_Delay(1);
+    SDL_Delay(16);
   }
 #ifdef GB_ENABLE_TUI
   if (debug)

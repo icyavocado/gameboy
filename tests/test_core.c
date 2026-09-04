@@ -221,6 +221,11 @@ UTEST(core, joyp_selection_and_serial_callback) {
   ASSERT_EQ(gb_dbg_read(g, 0xff00), 0xed);
   gb_dbg_write(g, 0xff00, 0x10);
   ASSERT_EQ(gb_dbg_read(g, 0xff00), 0xde);
+  gb_set_input(g, 0xf0);
+  gb_dbg_write(g, 0xff00, 0x10);
+  ASSERT_EQ(gb_dbg_read(g, 0xff00), 0xdf);
+  gb_dbg_write(g, 0xff00, 0x20);
+  ASSERT_EQ(gb_dbg_read(g, 0xff00), 0xe0);
   serial_calls = serial_received = 0;
   gb_set_serial_callback(g, serial_callback, NULL);
   gb_dbg_write(g, 0xff01, 'X');
