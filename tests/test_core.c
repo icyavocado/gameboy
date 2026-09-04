@@ -437,6 +437,36 @@ UTEST(core, mbc3_rtc_battery_round_trip) {
   gb_destroy(g);
 }
 
+UTEST(core, cgb_skip_boot_defaults_and_override) {
+  static uint8_t rom[0x10000];
+  memset(rom, 0, sizeof rom);
+  rom[0x143] = 0xc0;
+  gb_t *g = gb_create();
+  ASSERT_EQ(gb_load_rom(g, rom, sizeof rom), 0);
+  gb_regs_t r = regs(g);
+  ASSERT_EQ(r.af, 0x1180);
+  ASSERT_EQ(r.bc, 0);
+  ASSERT_EQ(r.de, 0xff56);
+  ASSERT_EQ(r.hl, 0x000d);
+  ASSERT_EQ(r.sp, 0xfffe);
+  ASSERT_EQ(r.pc, 0x100);
+  gb_set_model(g, GB_MODEL_DMG);
+  gb_reset(g);
+  r = regs(g);
+  ASSERT_EQ(r.af, 0x01b0);
+  ASSERT_EQ(r.bc, 0x0013);
+  ASSERT_EQ(r.de, 0x00d8);
+  ASSERT_EQ(r.hl, 0x014d);
+  gb_set_model(g, GB_MODEL_CGB);
+  gb_reset(g);
+  r = regs(g);
+  ASSERT_EQ(r.af, 0x1180);
+  ASSERT_EQ(r.bc, 0);
+  ASSERT_EQ(r.de, 0xff56);
+  ASSERT_EQ(r.hl, 0x000d);
+  gb_destroy(g);
+}
+
 UTEST(core, mbc2_nibble_ram_and_banking) {
   static uint8_t rom[0x40000];
   memset(rom, 0, sizeof rom);
@@ -868,6 +898,7 @@ int main(void) {
   core_mbc3_and_mbc5_bank_switching();
   core_mbc3_rtc_progression_and_state();
   core_mbc3_rtc_battery_round_trip();
+  core_cgb_skip_boot_defaults_and_override();
   core_mbc2_nibble_ram_and_banking();
   core_wram_echo();
   core_cgb_vram_wram_banking_and_state();

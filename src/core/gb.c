@@ -1531,10 +1531,17 @@ int gb_load_state(gb_t *g, const uint8_t *data, size_t n) {
 }
 void gb_set_model(gb_t *g, gb_model_t m) { g->model = m; }
 void gb_reset(gb_t *g) {
-  g->af = 0x1b0;
-  g->bc = 0x13;
-  g->de = 0xd8;
-  g->hl = 0x14d;
+  if (g->model == GB_MODEL_CGB) {
+    g->af = 0x1180;
+    g->bc = 0;
+    g->de = 0xff56;
+    g->hl = 0x000d;
+  } else {
+    g->af = 0x1b0;
+    g->bc = 0x13;
+    g->de = 0xd8;
+    g->hl = 0x14d;
+  }
   g->sp = 0xfffe;
   g->pc = 0x100;
   g->ime = g->halted = g->halt_bug = g->ei_delay = 0;
