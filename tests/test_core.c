@@ -114,6 +114,33 @@ UTEST(core, debugger_pc_breakpoints) {
   gb_destroy(g);
 }
 
+UTEST(core, optional_boot_rom_mapping) {
+  static uint8_t boot[0x900];
+  memset(boot, 0, sizeof boot);
+  boot[0] = 0xa5;
+  boot[0x200] = 0x5a;
+  gb_t *g = load((const uint8_t[]){0x00}, 1);
+  ASSERT_EQ(gb_load_boot_rom(g, boot, 0x200), -1);
+  ASSERT_EQ(gb_load_boot_rom(g, boot, 0x100), 0);
+  ASSERT_EQ(gb_dbg_read(g, 0), 0xa5);
+  gb_dbg_write(g, 0xff50, 1);
+  ASSERT_EQ(gb_dbg_read(g, 0), 0);
+  ASSERT_EQ(gb_dbg_read(g, 0x100), 0);
+  gb_destroy(g);
+
+  static uint8_t cgb_rom[0x10000];
+  memset(cgb_rom, 0, sizeof cgb_rom);
+  cgb_rom[0x143] = 0xc0;
+  g = gb_create();
+  ASSERT_EQ(gb_load_rom(g, cgb_rom, sizeof cgb_rom), 0);
+  ASSERT_EQ(gb_load_boot_rom(g, boot, sizeof boot), 0);
+  ASSERT_EQ(gb_dbg_read(g, 0), 0xa5);
+  ASSERT_EQ(gb_dbg_read(g, 0x200), 0x5a);
+  gb_dbg_write(g, 0xff50, 1);
+  ASSERT_EQ(gb_dbg_read(g, 0x200), 0);
+  gb_destroy(g);
+}
+
 UTEST(core, ei_delay_interrupt_and_halt) {
   static const uint8_t code[] = {0xfb, 0x00, 0x76};
   gb_t *g = load(code, sizeof code);
@@ -650,6 +677,7 @@ int main(void) {
   core_cb_bit_rotate_set_res();
   core_jumps_call_ret_and_stack();
   core_debugger_pc_breakpoints();
+  core_optional_boot_rom_mapping();
   core_ei_delay_interrupt_and_halt();
   core_timer_overflow_and_reset_state();
   core_joyp_selection_and_serial_callback();

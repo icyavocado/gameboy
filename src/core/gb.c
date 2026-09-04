@@ -7,7 +7,7 @@
 #define STATE_HEADER_SIZE 24u
 #define MAX_BREAKPOINTS 16u
 struct gb {
-  uint8_t *rom, *ram, mem[65536];
+  uint8_t *rom, *ram, *boot_rom, mem[65536];
   uint8_t vram[2][0x2000], wram[8][0x1000], oam[0xa0];
   uint8_t bg_palette[64], obj_palette[64];
   size_t rom_size, ram_size;
@@ -18,7 +18,7 @@ struct gb {
       ram_enable, upper, mode, ppu_mode, stat_signal, dma_page, dma_index,
       dma_active, timer_signal, rtc_select, rtc_latched_valid, rtc[5],
       rtc_latched[5], vbk, svbk, bg_palette_index, obj_palette_index, key1, opri,
-      ir, serial_active;
+      ir, serial_active, boot_enabled;
   uint16_t rom_bank;
   uint16_t hdma_source, hdma_dest;
   uint8_t hdma5;
@@ -275,6 +275,10 @@ static uint8_t jp(const gb_t *g) {
   return (uint8_t)(0xc0 | s | v);
 }
 static uint8_t rd(const gb_t *g, uint16_t a) {
+  if (g->boot_enabled && a < 0x100)
+    return g->boot_rom[a];
+  if (g->boot_enabled && g->model == GB_MODEL_CGB && a >= 0x200 && a < 0x900)
+    return g->boot_rom[a];
   if (a < 0x8000 && g->rom)
     return g->rom[rb(g, a)];
   if (a >= 0xe000 && a < 0xfe00)
@@ -428,6 +432,13 @@ static void wr(gb_t *g, uint16_t a, uint8_t v) {
   }
   if (a == 0xff00) {
     g->mem[a] = (uint8_t)((g->mem[a] & 0xcf) | (v & 0x30));
+    return;
+  }
+  if (a == 0xff50) {
+    if (v & 1) {
+      g->boot_enabled = 0;
+      g->mem[a] = 1;
+    }
     return;
   }
   if (a == 0xff4f) {
@@ -1180,6 +1191,7 @@ void gb_destroy(gb_t *g) {
   if (g) {
     free(g->rom);
     free(g->ram);
+    free(g->boot_rom);
     free(g);
   }
 }
@@ -1210,6 +1222,18 @@ int gb_load_rom(gb_t *g, const uint8_t *r, size_t n) {
   gb_reset(g);
   return 0;
 }
+int gb_load_boot_rom(gb_t *g, const uint8_t *rom, size_t n) {
+  if (!g || !rom || (n != 0x100 && n != 0x900))
+    return -1;
+  uint8_t *copy = malloc(n);
+  if (!copy)
+    return -1;
+  memcpy(copy, rom, n);
+  free(g->boot_rom);
+  g->boot_rom = copy;
+  g->boot_enabled = 1;
+  return 0;
+}
 size_t gb_save_ram_size(const gb_t *g) {
   return g && g->battery && g->ram ? g->ram_size : 0;
 }
@@ -1228,7 +1252,7 @@ int gb_load_ram(gb_t *g, const uint8_t *data, size_t n) {
 }
 size_t gb_save_state_size(const gb_t *g) {
   return g ? STATE_HEADER_SIZE + 0x10000u + sizeof g->vram + sizeof g->wram +
-                       0xa0u + sizeof g->fb + sizeof g->bg_line + 225u + g->ram_size
+                       0xa0u + sizeof g->fb + sizeof g->bg_line + 226u + g->ram_size
            : 0;
 }
 size_t gb_save_state(const gb_t *g, uint8_t *out) {
@@ -1298,6 +1322,7 @@ size_t gb_save_state(const gb_t *g, uint8_t *out) {
   *p++ = g->ir;
   *p++ = g->serial_active;
   put16(&p, g->serial_cycles);
+  *p++ = g->boot_enabled;
   put16(&p, g->hdma_source);
   put16(&p, g->hdma_dest);
   *p++ = g->hdma5;
@@ -1379,6 +1404,7 @@ int gb_load_state(gb_t *g, const uint8_t *data, size_t n) {
   g->ir = *p++;
   g->serial_active = *p++;
   g->serial_cycles = get16(&p);
+  g->boot_enabled = *p++;
   g->hdma_source = get16(&p);
   g->hdma_dest = get16(&p);
   g->hdma5 = *p++;
@@ -1420,6 +1446,7 @@ void gb_reset(gb_t *g) {
   g->hdma5 = 0xff;
   g->serial_active = 0;
   g->serial_cycles = 0;
+  g->boot_enabled = g->boot_rom != NULL;
   g->key1 = 0;
   g->opri = 0;
   g->ir = 0;

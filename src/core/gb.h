@@ -16,6 +16,7 @@ typedef struct { gb_bp_kind_t kind; uint16_t addr; } gb_bp_t;
 gb_t *gb_create(void);
 void gb_destroy(gb_t *gb);
 int gb_load_rom(gb_t *gb, const uint8_t *rom, size_t size);
+int gb_load_boot_rom(gb_t *gb, const uint8_t *rom, size_t size);
 size_t gb_save_ram_size(const gb_t *gb);
 size_t gb_save_ram(const gb_t *gb, uint8_t *out);
 int gb_load_ram(gb_t *gb, const uint8_t *data, size_t size);
