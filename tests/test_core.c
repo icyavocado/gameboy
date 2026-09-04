@@ -253,6 +253,35 @@ UTEST(core, save_state_round_trip) {
   gb_destroy(g);
 }
 
+UTEST(core, extended_control_and_stack_opcodes) {
+  static const uint8_t code[] = {
+      0x01, 0x34, 0x12, 0x21, 0x00, 0x10, 0x09, 0x0b, 0xc5,
+      0xd1, 0x3e, 0x80, 0x0f, 0x17, 0x1f, 0x76};
+  gb_t *g = load(code, sizeof code);
+  step(g, 11);
+  gb_regs_t r = regs(g);
+  ASSERT_EQ(r.hl, 0x2234);
+  ASSERT_EQ(r.bc, 0x1233);
+  ASSERT_EQ(r.de, 0x1233);
+  ASSERT_EQ(r.af >> 8, 0x40);
+  ASSERT_TRUE(r.halted);
+  gb_destroy(g);
+}
+
+UTEST(core, conditional_relative_and_signed_stack_arithmetic) {
+  static const uint8_t code[] = {
+      0x3e, 0x01, 0x06, 0x01, 0x90, 0x30, 0x02, 0x3e, 0xff,
+      0x20, 0x02, 0x3e, 0x42, 0xe8, 0x02, 0xf8, 0xfe, 0x76};
+  gb_t *g = load(code, sizeof code);
+  step(g, 9);
+  gb_regs_t r = regs(g);
+  ASSERT_EQ(r.af >> 8, 0x42);
+  ASSERT_EQ(r.hl, 0xfffe);
+  ASSERT_EQ(r.sp, 0x0000);
+  ASSERT_TRUE(r.halted);
+  gb_destroy(g);
+}
+
 int main(void) {
   core_immediate_and_register_loads();
   core_alu_flags_and_daa();
@@ -268,6 +297,8 @@ int main(void) {
   ppu_sprite_rendering();
   core_battery_ram_round_trip();
   core_save_state_round_trip();
-  puts("14 tests passed");
+  core_extended_control_and_stack_opcodes();
+  core_conditional_relative_and_signed_stack_arithmetic();
+  puts("16 tests passed");
   return 0;
 }

@@ -63,6 +63,22 @@ static void sr(gb_t *g, unsigned n, uint8_t v) {
   else
     *rp8(g, n) = v;
 }
+static int cond(const gb_t *g, unsigned n) {
+  return n == 0 ? !f(g, 7) : n == 1 ? f(g, 7) : n == 2 ? !f(g, 4) : f(g, 4);
+}
+static void addhl(gb_t *g, uint16_t v) {
+  uint16_t old = g->hl, r = (uint16_t)(old + v);
+  fs(g, f(g, 7), 0, ((old & 0xfff) + (v & 0xfff)) > 0xfff,
+     (unsigned)old + v > 0xffff);
+  g->hl = r;
+}
+static uint16_t addsp(gb_t *g, int8_t offset) {
+  uint16_t sp = g->sp;
+  unsigned value = (uint8_t)offset;
+  fs(g, 0, 0, ((sp & 15) + (value & 15)) > 15,
+     ((sp & 255) + value) > 255);
+  return (uint16_t)(sp + offset);
+}
 static uint8_t fc(gb_t *g) {
   uint8_t v = rd(g, g->pc);
   if (!g->halt_bug)
@@ -82,6 +98,15 @@ static void push(gb_t *g, uint16_t v) {
 static uint16_t pop(gb_t *g) {
   uint8_t l = rd(g, g->sp++), h = rd(g, g->sp++);
   return pr(h, l);
+}
+static void pop_pair(gb_t *g, unsigned n) {
+  uint16_t value = pop(g);
+  if (n == 3)
+    value &= 0xfff0;
+  if (n == 3)
+    g->af = value;
+  else
+    *rp16(g, n) = value;
 }
 static size_t ramsize(uint8_t c) {
   static const size_t n[] = {0, 0x800, 0x2000, 0x8000, 0x20000, 0x10000};
@@ -310,7 +335,7 @@ static int cb(gb_t *g, uint8_t o) {
     fs(g, r == 0, 0, 0, v & 1);
     break;
   case 4:
-    r = (uint8_t)((v << 1) | (v >> 7));
+    r = (uint8_t)(v << 1);
     fs(g, r == 0, 0, 0, v >> 7);
     break;
   case 5:
@@ -534,6 +559,21 @@ int gb_dbg_step(gb_t *g) {
     g->af = pr(v << 1 | v >> 7, lo(g->af));
     fs(g, 0, 0, 0, v >> 7);
     break;
+  case 0x0f:
+    v = hi(g->af);
+    g->af = pr((uint8_t)((v >> 1) | (v << 7)), lo(g->af));
+    fs(g, 0, 0, 0, v & 1);
+    break;
+  case 0x17:
+    v = hi(g->af);
+    g->af = pr((uint8_t)((v << 1) | f(g, 4)), lo(g->af));
+    fs(g, 0, 0, 0, v >> 7);
+    break;
+  case 0x1f:
+    v = hi(g->af);
+    g->af = pr((uint8_t)((v >> 1) | (f(g, 4) << 7)), lo(g->af));
+    fs(g, 0, 0, 0, v & 1);
+    break;
   case 0xf3:
     g->ime = 0;
     g->ei_delay = 0;
@@ -549,6 +589,21 @@ int gb_dbg_step(gb_t *g) {
     g->pc += ((int8_t)fc(g));
     c = 12;
     break;
+  case 0x20:
+  case 0x28:
+  case 0x30:
+  case 0x38: {
+    int take = cond(g, (o - 0x20) / 8);
+    int8_t offset = (int8_t)fc(g);
+    if (take)
+      g->pc += offset;
+    c = take ? 12 : 8;
+    break;
+  }
+  case 0x10:
+    fc(g);
+    g->halted = 1;
+    break;
   case 0xcd:
     n = fn(g);
     push(g, g->pc);
@@ -558,6 +613,60 @@ int gb_dbg_step(gb_t *g) {
   case 0xc9:
     g->pc = pop(g);
     c = 16;
+    break;
+  case 0xc0:
+  case 0xc8:
+  case 0xd0:
+  case 0xd8:
+    if (cond(g, (o - 0xc0) / 8)) {
+      g->pc = pop(g);
+      c = 20;
+    } else {
+      c = 8;
+    }
+    break;
+  case 0xc1:
+  case 0xd1:
+  case 0xe1:
+  case 0xf1:
+    pop_pair(g, (o - 0xc1) / 16);
+    c = 12;
+    break;
+  case 0xc5:
+  case 0xd5:
+  case 0xe5:
+  case 0xf5:
+    push(g, o == 0xc5 ? g->bc : o == 0xd5 ? g->de : o == 0xe5 ? g->hl : g->af);
+    c = 16;
+    break;
+  case 0xc4:
+  case 0xcc:
+  case 0xd4:
+  case 0xdc:
+    n = fn(g);
+    if (cond(g, (o - 0xc4) / 8)) {
+      push(g, g->pc);
+      g->pc = n;
+      c = 24;
+    } else {
+      c = 12;
+    }
+    break;
+  case 0xe2:
+    wr(g, (uint16_t)(0xff00 + lo(g->bc)), hi(g->af));
+    c = 8;
+    break;
+  case 0xf2:
+    g->af = pr(rd(g, (uint16_t)(0xff00 + lo(g->bc))), lo(g->af));
+    c = 8;
+    break;
+  case 0xe8:
+    g->sp = addsp(g, (int8_t)fc(g));
+    c = 16;
+    break;
+  case 0xf8:
+    g->hl = addsp(g, (int8_t)fc(g));
+    c = 12;
     break;
   case 0xd9:
     g->pc = pop(g);
@@ -588,9 +697,12 @@ int gb_dbg_step(gb_t *g) {
     g->pc = g->hl;
     break;
   default:
-    if (x == 0 && z == 1) {
+    if (x == 0 && z == 1 && !(y & 1)) {
       *rp16(g, y >> 1) = fn(g);
       c = 12;
+    } else if (x == 0 && z == 1) {
+      addhl(g, *rp16(g, y >> 1));
+      c = 8;
     } else if (x == 0 && z == 4) {
       sr(g, y, inc(g, gr(g, y)));
       c = y == 6 ? 12 : 4;
@@ -600,20 +712,18 @@ int gb_dbg_step(gb_t *g) {
     } else if (x == 0 && z == 6) {
       sr(g, y, fc(g));
       c = y == 6 ? 12 : 8;
-    } else if (x == 0 && z == 3) {
+    } else if (x == 0 && z == 3 && !(y & 1)) {
       (*rp16(g, y >> 1))++;
       c = 8;
-    } else if (x == 0 && z == 2) {
-      int8_t e = (int8_t)fc(g);
-      if (!y || f(g, y - 1))
-        g->pc += e;
-      c = !y || f(g, y - 1) ? 12 : 8;
+    } else if (x == 0 && z == 3 && (y & 1)) {
+      (*rp16(g, y >> 1))--;
+      c = 8;
     } else if (x == 3 && z == 2 && y < 4) {
-      if (!y || f(g, y - 1))
+      if (cond(g, y))
         g->pc = fn(g);
       else
         g->pc += 2;
-      c = !y || f(g, y - 1) ? 16 : 12;
+      c = cond(g, y) ? 16 : 12;
     } else if (x == 3 && z == 7) {
       push(g, g->pc);
       g->pc = y * 8;
