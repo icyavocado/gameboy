@@ -10,6 +10,8 @@ typedef enum { GB_MODEL_AUTO, GB_MODEL_DMG, GB_MODEL_CGB } gb_model_t;
 typedef void (*gb_audio_cb)(void *user, const int16_t *stereo, size_t frames);
 typedef void (*gb_serial_cb)(void *user, uint8_t out, uint8_t *in);
 typedef struct { uint16_t af, bc, de, hl, sp, pc; bool ime, halted; } gb_regs_t;
+typedef enum { GB_BP_PC, GB_BP_READ, GB_BP_WRITE } gb_bp_kind_t;
+typedef struct { gb_bp_kind_t kind; uint16_t addr; } gb_bp_t;
 
 gb_t *gb_create(void);
 void gb_destroy(gb_t *gb);
@@ -31,5 +33,9 @@ uint8_t gb_dbg_read(const gb_t *gb, uint16_t address);
 void gb_dbg_write(gb_t *gb, uint16_t address, uint8_t value);
 void gb_dbg_regs(const gb_t *gb, gb_regs_t *out);
 int gb_dbg_step(gb_t *gb);
+void gb_dbg_enable(gb_t *gb, bool enabled);
+int gb_dbg_run_until_break(gb_t *gb);
+int gb_dbg_add_bp(gb_t *gb, gb_bp_t breakpoint);
+void gb_dbg_del_bp(gb_t *gb, int id);
 
 #endif

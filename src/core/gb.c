@@ -5,6 +5,7 @@
 /* Invalid SM83 opcodes are intentionally treated as NOPs in Phase 1. */
 #define STATE_VERSION 7u
 #define STATE_HEADER_SIZE 24u
+#define MAX_BREAKPOINTS 16u
 struct gb {
   uint8_t *rom, *ram, mem[65536];
   uint8_t vram[2][0x2000], wram[8][0x1000], oam[0xa0];
@@ -32,6 +33,8 @@ struct gb {
   void *serial_user;
   gb_audio_cb audio;
   void *audio_user;
+  gb_bp_t breakpoints[MAX_BREAKPOINTS];
+  uint8_t breakpoint_used[MAX_BREAKPOINTS], debug_enabled;
 };
 static uint8_t lo(uint16_t x) { return (uint8_t)x; }
 static uint8_t hi(uint16_t x) { return (uint8_t)(x >> 8); }
@@ -1126,6 +1129,36 @@ done:
     g->ime = 1;
   tick(g, (unsigned)c);
   return c;
+}
+void gb_dbg_enable(gb_t *g, bool enabled) { if (g) g->debug_enabled = enabled; }
+int gb_dbg_run_until_break(gb_t *g) {
+  if (!g)
+    return -1;
+  unsigned cycles = 0;
+  while (cycles < 70224) {
+    if (g->debug_enabled)
+      for (unsigned i = 0; i < MAX_BREAKPOINTS; i++)
+        if (g->breakpoint_used[i] && g->breakpoints[i].kind == GB_BP_PC &&
+            g->breakpoints[i].addr == g->pc)
+          return (int)i;
+    cycles += (unsigned)gb_dbg_step(g);
+  }
+  return -1;
+}
+int gb_dbg_add_bp(gb_t *g, gb_bp_t breakpoint) {
+  if (!g || breakpoint.kind != GB_BP_PC)
+    return -1;
+  for (unsigned i = 0; i < MAX_BREAKPOINTS; i++)
+    if (!g->breakpoint_used[i]) {
+      g->breakpoints[i] = breakpoint;
+      g->breakpoint_used[i] = 1;
+      return (int)i;
+    }
+  return -1;
+}
+void gb_dbg_del_bp(gb_t *g, int id) {
+  if (g && id >= 0 && id < (int)MAX_BREAKPOINTS)
+    g->breakpoint_used[id] = 0;
 }
 void gb_run_frame(gb_t *g) {
   unsigned n = 0;

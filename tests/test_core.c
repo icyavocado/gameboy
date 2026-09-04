@@ -100,6 +100,20 @@ UTEST(core, jumps_call_ret_and_stack) {
   gb_destroy(g);
 }
 
+UTEST(core, debugger_pc_breakpoints) {
+  gb_t *g = load((const uint8_t[]){0x00, 0x00, 0x76}, 3);
+  gb_bp_t breakpoint = {GB_BP_PC, 0x101};
+  int id = gb_dbg_add_bp(g, breakpoint);
+  ASSERT_TRUE(id >= 0);
+  gb_dbg_enable(g, true);
+  ASSERT_EQ(gb_dbg_run_until_break(g), id);
+  ASSERT_EQ(regs(g).pc, 0x101);
+  ASSERT_EQ(gb_dbg_step(g), 4);
+  ASSERT_EQ(gb_dbg_run_until_break(g), -1);
+  gb_dbg_del_bp(g, id);
+  gb_destroy(g);
+}
+
 UTEST(core, ei_delay_interrupt_and_halt) {
   static const uint8_t code[] = {0xfb, 0x00, 0x76};
   gb_t *g = load(code, sizeof code);
@@ -635,6 +649,7 @@ int main(void) {
   core_alu_flags_and_daa();
   core_cb_bit_rotate_set_res();
   core_jumps_call_ret_and_stack();
+  core_debugger_pc_breakpoints();
   core_ei_delay_interrupt_and_halt();
   core_timer_overflow_and_reset_state();
   core_joyp_selection_and_serial_callback();
