@@ -43,6 +43,7 @@ struct gb {
   gb_bp_t breakpoints[MAX_BREAKPOINTS];
   uint8_t breakpoint_used[MAX_BREAKPOINTS], debug_enabled, watch_hit, debug_fetch,
       debug_pc_hit;
+  unsigned instruction_cycles;
 };
 static uint8_t lo(uint16_t x) { return (uint8_t)x; }
 static uint8_t hi(uint16_t x) { return (uint8_t)(x >> 8); }
@@ -55,6 +56,7 @@ static void fs(gb_t *g, unsigned z, unsigned n, unsigned h, unsigned c) {
 }
 static uint8_t rd(const gb_t *, uint16_t);
 static void wr(gb_t *, uint16_t, uint8_t);
+static void tick(gb_t *, unsigned);
 static void ppu_tick(gb_t *);
 static void ppu_stat(gb_t *);
 static void audio_trigger(gb_t *, unsigned);
@@ -243,6 +245,31 @@ static uint8_t fc(gb_t *g) {
 static uint16_t fn(gb_t *g) {
   uint8_t l = fc(g);
   return pr(fc(g), l);
+}
+static void cpu_tick(gb_t *g, unsigned cycles) {
+  g->instruction_cycles += cycles;
+  tick(g, g->double_speed ? cycles / 2 : cycles);
+}
+static uint8_t timed_read(gb_t *g, uint16_t address, unsigned cycles) {
+  cpu_tick(g, cycles - 4);
+  uint8_t value = rd(g, address);
+  cpu_tick(g, 4);
+  return value;
+}
+static void timed_write(gb_t *g, uint16_t address, uint8_t value,
+                        unsigned cycles) {
+  cpu_tick(g, cycles - 4);
+  wr(g, address, value);
+  cpu_tick(g, 4);
+}
+static uint8_t timed_gr(gb_t *g, unsigned n, unsigned cycles) {
+  return n == 6 ? timed_read(g, g->hl, cycles) : gr(g, n);
+}
+static void timed_sr(gb_t *g, unsigned n, uint8_t value, unsigned cycles) {
+  if (n == 6)
+    timed_write(g, g->hl, value, cycles);
+  else
+    sr(g, n, value);
 }
 static void push(gb_t *g, uint16_t v) {
   wr(g, --g->sp, hi(v));
@@ -703,17 +730,36 @@ static void daa(gb_t *g) {
 }
 static int cb(gb_t *g, uint8_t o) {
   unsigned n = o & 7, b = o >> 3 & 7, k = o >> 6;
-  uint8_t v = gr(g, n), r;
+  uint8_t v, r;
+  if (n == 6) {
+    cpu_tick(g, 8);
+    v = rd(g, g->hl);
+  } else {
+    v = gr(g, n);
+  }
   if (k == 1) {
     fs(g, !(v & (1u << b)), 0, 1, f(g, 4));
+    cpu_tick(g, 4);
     return n == 6 ? 12 : 8;
   }
   if (k == 2) {
-    sr(g, n, v & ~(1u << b));
+    if (n == 6) {
+      cpu_tick(g, 4);
+      wr(g, g->hl, v & ~(1u << b));
+      cpu_tick(g, 4);
+    } else {
+      sr(g, n, v & ~(1u << b));
+    }
     return n == 6 ? 16 : 8;
   }
   if (k == 3) {
-    sr(g, n, v | (1u << b));
+    if (n == 6) {
+      cpu_tick(g, 4);
+      wr(g, g->hl, v | (1u << b));
+      cpu_tick(g, 4);
+    } else {
+      sr(g, n, v | (1u << b));
+    }
     return n == 6 ? 16 : 8;
   }
   switch (b) {
@@ -750,7 +796,13 @@ static int cb(gb_t *g, uint8_t o) {
     fs(g, r == 0, 0, 0, v & 1);
     break;
   }
-  sr(g, n, r);
+  if (n == 6) {
+    cpu_tick(g, 4);
+    wr(g, g->hl, r);
+    cpu_tick(g, 4);
+  } else {
+    sr(g, n, r);
+  }
   return n == 6 ? 16 : 8;
 }
 static uint32_t cgb_color(const uint8_t *palette, unsigned index) {
@@ -962,13 +1014,14 @@ int gb_dbg_step(gb_t *g) {
         g->halt_bug = 1;
       c = 4;
     } else {
-      sr(g, y, gr(g, z));
+      uint8_t value = timed_gr(g, z, 8);
+      timed_sr(g, y, value, 8);
       c = (y == 6 || z == 6) ? 8 : 4;
     }
     goto done;
   }
   if (x == 2) {
-    alu(g, y, gr(g, z));
+    alu(g, y, timed_gr(g, z, 8));
     c = z == 6 ? 8 : 4;
     goto done;
   }
@@ -981,19 +1034,19 @@ int gb_dbg_step(gb_t *g) {
   case 0:
     break;
   case 2:
-    wr(g, g->bc, hi(g->af));
+    timed_write(g, g->bc, hi(g->af), 8);
     c = 8;
     break;
   case 0xa:
-    g->af = pr(rd(g, g->bc), lo(g->af));
+    g->af = pr(timed_read(g, g->bc, 8), lo(g->af));
     c = 8;
     break;
   case 0x12:
-    wr(g, g->de, hi(g->af));
+    timed_write(g, g->de, hi(g->af), 8);
     c = 8;
     break;
   case 0x1a:
-    g->af = pr(rd(g, g->de), lo(g->af));
+    g->af = pr(timed_read(g, g->de, 8), lo(g->af));
     c = 8;
     break;
   case 8:
@@ -1003,19 +1056,23 @@ int gb_dbg_step(gb_t *g) {
     c = 20;
     break;
   case 0x22:
-    wr(g, g->hl++, hi(g->af));
+    timed_write(g, g->hl, hi(g->af), 8);
+    g->hl++;
     c = 8;
     break;
   case 0x2a:
-    g->af = pr(rd(g, g->hl++), lo(g->af));
+    g->af = pr(timed_read(g, g->hl, 8), lo(g->af));
+    g->hl++;
     c = 8;
     break;
   case 0x32:
-    wr(g, g->hl--, hi(g->af));
+    timed_write(g, g->hl, hi(g->af), 8);
+    g->hl--;
     c = 8;
     break;
   case 0x3a:
-    g->af = pr(rd(g, g->hl--), lo(g->af));
+    g->af = pr(timed_read(g, g->hl, 8), lo(g->af));
+    g->hl--;
     c = 8;
     break;
   case 0x27:
@@ -1136,11 +1193,11 @@ int gb_dbg_step(gb_t *g) {
     }
     break;
   case 0xe2:
-    wr(g, (uint16_t)(0xff00 + lo(g->bc)), hi(g->af));
+    timed_write(g, (uint16_t)(0xff00 + lo(g->bc)), hi(g->af), 8);
     c = 8;
     break;
   case 0xf2:
-    g->af = pr(rd(g, (uint16_t)(0xff00 + lo(g->bc))), lo(g->af));
+    g->af = pr(timed_read(g, (uint16_t)(0xff00 + lo(g->bc)), 8), lo(g->af));
     c = 8;
     break;
   case 0xe8:
@@ -1157,19 +1214,21 @@ int gb_dbg_step(gb_t *g) {
     c = 16;
     break;
   case 0xe0:
-    wr(g, 0xff00 + fc(g), hi(g->af));
+    timed_write(g, 0xff00 + fc(g), hi(g->af), 12);
     c = 12;
     break;
   case 0xf0:
-    g->af = pr(rd(g, 0xff00 + fc(g)), lo(g->af));
+    g->af = pr(timed_read(g, 0xff00 + fc(g), 12), lo(g->af));
     c = 12;
     break;
   case 0xea:
-    wr(g, fn(g), hi(g->af));
+    n = fn(g);
+    timed_write(g, n, hi(g->af), 16);
     c = 16;
     break;
   case 0xfa:
-    g->af = pr(rd(g, fn(g)), lo(g->af));
+    n = fn(g);
+    g->af = pr(timed_read(g, n, 16), lo(g->af));
     c = 16;
     break;
   case 0xf9:
@@ -1187,13 +1246,34 @@ int gb_dbg_step(gb_t *g) {
       addhl(g, *rp16(g, y >> 1));
       c = 8;
     } else if (x == 0 && z == 4) {
-      sr(g, y, inc(g, gr(g, y)));
+      uint8_t value;
+      if (y == 6) {
+        cpu_tick(g, 4);
+        value = rd(g, g->hl);
+        cpu_tick(g, 4);
+        wr(g, g->hl, inc(g, value));
+        cpu_tick(g, 4);
+      } else {
+        value = inc(g, gr(g, y));
+        sr(g, y, value);
+      }
       c = y == 6 ? 12 : 4;
     } else if (x == 0 && z == 5) {
-      sr(g, y, dec(g, gr(g, y)));
+      uint8_t value;
+      if (y == 6) {
+        cpu_tick(g, 4);
+        value = rd(g, g->hl);
+        cpu_tick(g, 4);
+        wr(g, g->hl, dec(g, value));
+        cpu_tick(g, 4);
+      } else {
+        value = dec(g, gr(g, y));
+        sr(g, y, value);
+      }
       c = y == 6 ? 12 : 4;
     } else if (x == 0 && z == 6) {
-      sr(g, y, fc(g));
+      uint8_t value = fc(g);
+      timed_sr(g, y, value, y == 6 ? 12 : 8);
       c = y == 6 ? 12 : 8;
     } else if (x == 0 && z == 3 && !(y & 1)) {
       (*rp16(g, y >> 1))++;
@@ -1217,7 +1297,9 @@ int gb_dbg_step(gb_t *g) {
 done:
   if (g->ei_delay && !--g->ei_delay)
     g->ime = 1;
-  tick(g, (unsigned)(g->double_speed ? c / 2 : c));
+  if (g->instruction_cycles < (unsigned)c)
+    cpu_tick(g, (unsigned)c - g->instruction_cycles);
+  g->instruction_cycles = 0;
   return c;
 }
 void gb_dbg_enable(gb_t *g, bool enabled) { if (g) g->debug_enabled = enabled; }

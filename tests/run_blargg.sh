@@ -12,6 +12,10 @@ run_if_present() {
 }
 
 run_if_present "$roms/instr_timing/instr_timing.gb"
+for rom in "$roms"/mem_timing/individual/*.gb; do
+  [ -f "$rom" ] || continue
+  run_if_present "$rom"
+done
 if [ -d "$roms/cpu_instrs/individual" ]; then
   for rom in "$roms"/cpu_instrs/individual/*.gb; do
     [ -f "$rom" ] || continue
