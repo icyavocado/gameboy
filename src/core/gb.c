@@ -273,9 +273,9 @@ static size_t rb(const gb_t *g, uint16_t a) {
 static uint8_t jp(const gb_t *g) {
   uint8_t s = g->mem[0xff00] & 0x30, v = 0xf;
   if (!(s & 0x10))
-    v &= (uint8_t)~(g->input >> 4);
-  if (!(s & 0x20))
     v &= (uint8_t)~(g->input & 15);
+  if (!(s & 0x20))
+    v &= (uint8_t)~(g->input >> 4);
   return (uint8_t)(0xc0 | s | v);
 }
 static uint8_t rd(const gb_t *g, uint16_t a) {

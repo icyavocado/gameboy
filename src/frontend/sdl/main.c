@@ -1,4 +1,5 @@
 #include "gb.h"
+#include "input.h"
 #include <SDL.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -57,29 +58,6 @@ static void audio(void *user, const int16_t *stereo, size_t frames) {
   if (SDL_GetQueuedAudioSize(device) > bytes * 2)
     return;
   SDL_QueueAudio(device, stereo, bytes);
-}
-
-static uint8_t key_button(SDL_Keycode key) {
-  switch (key) {
-  case SDLK_RIGHT:
-  case SDLK_d: return 1 << 0;
-  case SDLK_LEFT:
-  case SDLK_a: return 1 << 1;
-  case SDLK_UP:
-  case SDLK_w: return 1 << 2;
-  case SDLK_DOWN:
-  case SDLK_s: return 1 << 3;
-  case SDLK_z: return 1 << 4;
-  case SDLK_x: return 1 << 5;
-  case SDLK_LSHIFT:
-  case SDLK_RSHIFT: return 1 << 6;
-  case SDLK_TAB: return 1 << 6;
-  case SDLK_BACKSPACE: return 1 << 6;
-  case SDLK_RETURN:
-  case SDLK_KP_ENTER:
-  case SDLK_SPACE: return 1 << 7;
-  default: return 0;
-  }
 }
 
 static void draw_button(SDL_Renderer *renderer, SDL_Rect rect, int pressed) {
@@ -204,7 +182,7 @@ int main(int argc, char **argv) {
       if (event.type == SDL_QUIT)
         running = 0;
       if (event.type == SDL_KEYDOWN || event.type == SDL_KEYUP) {
-        uint8_t button = key_button(event.key.keysym.sym);
+        uint8_t button = gb_sdl_key_button(event.key.keysym.sym);
         if (button) {
           if (event.type == SDL_KEYDOWN)
             buttons |= button;

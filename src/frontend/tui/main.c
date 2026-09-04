@@ -15,7 +15,7 @@ int main(int argc, char **argv) {
   if (gb_load_rom(gb, rom, (size_t)size)) return 1;
   free(rom);
   initscr(); cbreak(); noecho(); nodelay(stdscr, TRUE); keypad(stdscr, TRUE);
-  gb_regs_t regs; char disasm[64]; int running = 1, debug = 0, breakpoint = -1;
+  gb_regs_t regs; char disasm[64]; int running = 1, breakpoint = -1;
   while (running) {
     gb_dbg_regs(gb, &regs);
     gb_dbg_disasm(gb, regs.pc, disasm, sizeof disasm);
