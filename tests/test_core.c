@@ -84,6 +84,13 @@ UTEST(core, compare_preserves_accumulator) {
   gb_destroy(g);
 }
 
+UTEST(core, adc_uses_carry) {
+  gb_t *g = load((const uint8_t[]){0x3e, 0xff, 0x37, 0xce, 0x00, 0x76}, 6);
+  step(g, 4);
+  ASSERT_EQ(regs(g).af, 0x00b0);
+  gb_destroy(g);
+}
+
 UTEST(core, cb_bit_rotate_set_res) {
   static const uint8_t code[] = {
       0x3e, 0x81, 0xcb, 0x07, 0xcb, 0x47, 0xcb, 0x87, 0xcb, 0xc7, 0x76};
@@ -715,6 +722,7 @@ int main(void) {
   core_immediate_and_register_loads();
   core_alu_flags_and_daa();
   core_compare_preserves_accumulator();
+  core_adc_uses_carry();
   core_cb_bit_rotate_set_res();
   core_jumps_call_ret_and_stack();
   core_debugger_pc_breakpoints();

@@ -82,6 +82,35 @@ static uint8_t key_button(SDL_Keycode key) {
   }
 }
 
+static void draw_button(SDL_Renderer *renderer, SDL_Rect rect, int pressed) {
+  SDL_SetRenderDrawColor(renderer, pressed ? 220 : 70, pressed ? 70 : 70,
+                        pressed ? 70 : 80, 190);
+  SDL_RenderFillRect(renderer, &rect);
+  SDL_SetRenderDrawColor(renderer, 245, 245, 245, 220);
+  SDL_RenderDrawRect(renderer, &rect);
+}
+
+static void draw_controller(SDL_Renderer *renderer, uint8_t buttons) {
+  SDL_Rect rect;
+  SDL_SetRenderDrawBlendMode(renderer, SDL_BLENDMODE_BLEND);
+  rect = (SDL_Rect){64, 448, 32, 32};
+  draw_button(renderer, rect, buttons & (1 << 2));
+  rect = (SDL_Rect){64, 512, 32, 32};
+  draw_button(renderer, rect, buttons & (1 << 3));
+  rect = (SDL_Rect){32, 480, 32, 32};
+  draw_button(renderer, rect, buttons & (1 << 1));
+  rect = (SDL_Rect){96, 480, 32, 32};
+  draw_button(renderer, rect, buttons & (1 << 0));
+  rect = (SDL_Rect){416, 480, 48, 24};
+  draw_button(renderer, rect, buttons & (1 << 6));
+  rect = (SDL_Rect){480, 480, 48, 24};
+  draw_button(renderer, rect, buttons & (1 << 7));
+  rect = (SDL_Rect){528, 432, 40, 40};
+  draw_button(renderer, rect, buttons & (1 << 4));
+  rect = (SDL_Rect){576, 464, 40, 40};
+  draw_button(renderer, rect, buttons & (1 << 5));
+}
+
 int main(int argc, char **argv) {
   int debug = argc == 3 && strcmp(argv[1], "--debug") == 0;
   const char *path = debug ? argv[2] : argc == 2 ? argv[1] : NULL;
@@ -219,6 +248,7 @@ int main(int argc, char **argv) {
     SDL_UpdateTexture(texture, NULL, gb_framebuffer(gb), 160 * 4);
     SDL_RenderClear(renderer);
     SDL_RenderCopy(renderer, texture, NULL, NULL);
+    draw_controller(renderer, buttons);
     SDL_RenderPresent(renderer);
     SDL_Delay(16);
   }
