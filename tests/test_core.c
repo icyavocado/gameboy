@@ -289,6 +289,30 @@ UTEST(core, cgb_vram_wram_banking_and_state) {
   gb_destroy(g);
 }
 
+UTEST(ppu, cgb_tile_attributes_and_palette) {
+  static uint8_t rom[0x8000];
+  memset(rom, 0, sizeof rom);
+  rom[0x143] = 0xc0;
+  gb_t *g = gb_create();
+  ASSERT_EQ(gb_load_rom(g, rom, sizeof rom), 0);
+  gb_dbg_write(g, 0xff4f, 1);
+  gb_dbg_write(g, 0x8010, 0x80);
+  gb_dbg_write(g, 0x8011, 0x00);
+  gb_dbg_write(g, 0x9800, 0x08);
+  gb_dbg_write(g, 0xff4f, 0);
+  gb_dbg_write(g, 0x9800, 0x01);
+  gb_dbg_write(g, 0xff68, 0x82);
+  gb_dbg_write(g, 0xff69, 0x1f);
+  gb_dbg_write(g, 0xff69, 0x00);
+  ASSERT_EQ(gb_dbg_read(g, 0xff68), 0x84);
+  ASSERT_EQ(gb_dbg_read(g, 0x9800), 1);
+  gb_dbg_write(g, 0xff4f, 1);
+  ASSERT_EQ(gb_dbg_read(g, 0x8010), 0x80);
+  gb_run_frame(g);
+  ASSERT_EQ(gb_framebuffer(g)[0], 0xffff0000);
+  gb_destroy(g);
+}
+
 UTEST(ppu, background_tile) {
   gb_t *g = load((const uint8_t[]){0x76}, 1);
   gb_dbg_write(g, 0x8010, 0x80);
@@ -492,6 +516,7 @@ int main(void) {
   core_mbc2_nibble_ram_and_banking();
   core_wram_echo();
   core_cgb_vram_wram_banking_and_state();
+  ppu_cgb_tile_attributes_and_palette();
   ppu_background_tile();
   ppu_lcd_timing_and_interrupts();
   ppu_sprite_rendering();

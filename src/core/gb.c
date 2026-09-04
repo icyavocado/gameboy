@@ -8,6 +8,7 @@
 struct gb {
   uint8_t *rom, *ram, mem[65536];
   uint8_t vram[2][0x2000], wram[8][0x1000], oam[0xa0];
+  uint8_t bg_palette[64], obj_palette[64];
   size_t rom_size, ram_size;
   uint32_t fb[160 * 144];
   uint8_t bg_line[160];
@@ -15,7 +16,7 @@ struct gb {
   uint8_t ime, ei_delay, halted, halt_bug, input, div, mbc, battery, ram_bank,
       ram_enable, upper, mode, ppu_mode, stat_signal, dma_page, dma_index,
       dma_active, timer_signal, rtc_select, rtc_latched_valid, rtc[5],
-      rtc_latched[5], vbk, svbk;
+      rtc_latched[5], vbk, svbk, bg_palette_index, obj_palette_index;
   uint16_t rom_bank;
   unsigned ppu_cycles;
   unsigned dma_cycles;
@@ -282,6 +283,13 @@ static uint8_t rd(const gb_t *g, uint16_t a) {
   }
   if (a >= 0xff10 && a <= 0xff26)
     return audio_read(g, a);
+  if (a == 0xff68 || a == 0xff6a)
+    return g->mem[a];
+  if (a == 0xff69 || a == 0xff6b) {
+    const uint8_t *palette = a == 0xff69 ? g->bg_palette : g->obj_palette;
+    const uint8_t index = a == 0xff69 ? g->bg_palette_index : g->obj_palette_index;
+    return palette[index & 0x3f];
+  }
   return a == 0xff00 ? jp(g) : g->mem[a];
 }
 static void wr(gb_t *g, uint16_t a, uint8_t v) {
@@ -399,6 +407,24 @@ static void wr(gb_t *g, uint16_t a, uint8_t v) {
   if (a == 0xff70) {
     g->mem[a] = (uint8_t)(0xf8 | (v & 7));
     g->svbk = v & 7;
+    return;
+  }
+  if (a == 0xff68 || a == 0xff6a) {
+    g->mem[a] = v & 0xbf;
+    if (a == 0xff68)
+      g->bg_palette_index = g->mem[a];
+    else
+      g->obj_palette_index = g->mem[a];
+    return;
+  }
+  if (a == 0xff69 || a == 0xff6b) {
+    uint8_t *palette = a == 0xff69 ? g->bg_palette : g->obj_palette;
+    uint8_t *index = a == 0xff69 ? &g->bg_palette_index : &g->obj_palette_index;
+    palette[*index & 0x3f] = v;
+    if (*index & 0x80) {
+      *index = (uint8_t)(0x80 | ((*index + 1) & 0x3f));
+      g->mem[a == 0xff69 ? 0xff68 : 0xff6a] = *index;
+    }
     return;
   }
   if (a == 0xff26) {
@@ -595,9 +621,16 @@ static int cb(gb_t *g, uint8_t o) {
   sr(g, n, r);
   return n == 6 ? 16 : 8;
 }
-static uint8_t tile_pixel(const gb_t *g, int tile, unsigned row, unsigned col) {
+static uint32_t cgb_color(const uint8_t *palette, unsigned index) {
+  uint16_t value = (uint16_t)(palette[index * 2] | palette[index * 2 + 1] << 8);
+  unsigned r = value & 31, green = (value >> 5) & 31, b = (value >> 10) & 31;
+  return 0xff000000u | ((r * 255 / 31) << 16) | ((green * 255 / 31) << 8) |
+         (b * 255 / 31);
+}
+static uint8_t tile_pixel(const gb_t *g, int tile, unsigned row, unsigned col,
+                          unsigned bank) {
   size_t a = (size_t)((tile & 255) * 16 + row * 2);
-  uint8_t lo = g->vram[0][a & 0x1fff], hi = g->vram[0][(a + 1) & 0x1fff];
+  uint8_t lo = g->vram[bank][a & 0x1fff], hi = g->vram[bank][(a + 1) & 0x1fff];
   return (uint8_t)(((hi >> (7 - col)) & 1) * 2 + ((lo >> (7 - col)) & 1));
 }
 static void ppu_line(gb_t *g, unsigned y) {
@@ -614,11 +647,22 @@ static void ppu_line(gb_t *g, unsigned y) {
     unsigned map = window ? ((lcdc & 0x40) ? 0x1c00 : 0x1800)
                           : ((lcdc & 8) ? 0x1c00 : 0x1800);
     unsigned tx = (px >> 3) & 31, ty = (py >> 3) & 31;
-    uint8_t t = g->vram[0][map + ty * 32 + tx], pal = g->mem[0xff47];
+    uint8_t t = g->vram[0][map + ty * 32 + tx], attr = g->model == GB_MODEL_CGB
+                                                        ? g->vram[1][map + ty * 32 + tx]
+                                                        : 0;
+    uint8_t pal = g->mem[0xff47];
     int tile = (lcdc & 0x10) ? t : (int8_t)t + 256;
-    uint8_t p = (lcdc & 1) ? tile_pixel(g, tile, py & 7, px & 7) : 0;
+    unsigned row = py & 7, col = px & 7;
+    if (g->model == GB_MODEL_CGB) {
+      if (attr & 0x20) col = 7 - col;
+      if (attr & 0x40) row = 7 - row;
+    }
+    uint8_t p = (lcdc & 1) ? tile_pixel(g, tile, row, col,
+                                         g->model == GB_MODEL_CGB ? (attr >> 3) & 1 : 0) : 0;
     g->bg_line[x] = p;
-    g->fb[y * 160 + x] = color[(pal >> (p * 2)) & 3];
+    g->fb[y * 160 + x] = g->model == GB_MODEL_CGB
+                              ? cgb_color(g->bg_palette, (attr & 7) * 4 + p)
+                              : color[(pal >> (p * 2)) & 3];
   }
   if ((lcdc & 2) && (lcdc & 0x80)) {
     unsigned height = (lcdc & 4) ? 16 : 8, drawn = 0;
@@ -633,10 +677,13 @@ static void ppu_line(gb_t *g, unsigned y) {
         unsigned tile_col = a & 0x20 ? 7 - col : col;
         int xx = (int)sx - 8 + (int)col;
         if (xx < 0 || xx >= 160) continue;
-        uint8_t p = tile_pixel(g, t + (line >= 8), (unsigned)line & 7, tile_col);
+        uint8_t p = tile_pixel(g, t + (line >= 8), (unsigned)line & 7, tile_col,
+                               g->model == GB_MODEL_CGB && (a & 8) ? 1 : 0);
         if (!p || ((a & 0x80) && g->bg_line[xx])) continue;
         uint8_t pal = a & 0x10 ? g->mem[0xff49] : g->mem[0xff48];
-        g->fb[y * 160 + xx] = color[(pal >> (p * 2)) & 3];
+        g->fb[y * 160 + xx] = g->model == GB_MODEL_CGB
+                                  ? cgb_color(g->obj_palette, (a & 7) * 4 + p)
+                                  : color[(pal >> (p * 2)) & 3];
       }
     }
   }
@@ -1056,7 +1103,7 @@ int gb_load_ram(gb_t *g, const uint8_t *data, size_t n) {
 }
 size_t gb_save_state_size(const gb_t *g) {
   return g ? STATE_HEADER_SIZE + 0x10000u + sizeof g->vram + sizeof g->wram +
-                     0xa0u + sizeof g->fb + sizeof g->bg_line + 84u + g->ram_size
+                     0xa0u + sizeof g->fb + sizeof g->bg_line + 214u + g->ram_size
            : 0;
 }
 size_t gb_save_state(const gb_t *g, uint8_t *out) {
@@ -1081,6 +1128,10 @@ size_t gb_save_state(const gb_t *g, uint8_t *out) {
   p += sizeof g->fb;
   memcpy(p, g->bg_line, sizeof g->bg_line);
   p += sizeof g->bg_line;
+  memcpy(p, g->bg_palette, sizeof g->bg_palette);
+  p += sizeof g->bg_palette;
+  memcpy(p, g->obj_palette, sizeof g->obj_palette);
+  p += sizeof g->obj_palette;
   put16(&p, g->af);
   put16(&p, g->bc);
   put16(&p, g->de);
@@ -1119,6 +1170,8 @@ size_t gb_save_state(const gb_t *g, uint8_t *out) {
   put32(&p, (uint32_t)g->model);
   *p++ = g->vbk;
   *p++ = g->svbk;
+  *p++ = g->bg_palette_index;
+  *p++ = g->obj_palette_index;
   put16(&p, g->noise_lfsr);
   for (unsigned i = 0; i < 4; i++) {
     put32(&p, g->audio_phase[i]);
@@ -1148,6 +1201,10 @@ int gb_load_state(gb_t *g, const uint8_t *data, size_t n) {
   p += sizeof g->fb;
   memcpy(g->bg_line, p, sizeof g->bg_line);
   p += sizeof g->bg_line;
+  memcpy(g->bg_palette, p, sizeof g->bg_palette);
+  p += sizeof g->bg_palette;
+  memcpy(g->obj_palette, p, sizeof g->obj_palette);
+  p += sizeof g->obj_palette;
   g->af = get16(&p);
   g->bc = get16(&p);
   g->de = get16(&p);
@@ -1186,6 +1243,8 @@ int gb_load_state(gb_t *g, const uint8_t *data, size_t n) {
   g->model = (gb_model_t)get32(&p);
   g->vbk = *p++;
   g->svbk = *p++;
+  g->bg_palette_index = *p++;
+  g->obj_palette_index = *p++;
   g->noise_lfsr = get16(&p);
   for (unsigned i = 0; i < 4; i++) {
     g->audio_phase[i] = get32(&p);
@@ -1226,6 +1285,7 @@ void gb_reset(gb_t *g) {
   g->mem[0xff47] = 0xe4;
   g->mem[0xff4f] = 0xfe;
   g->mem[0xff70] = 0xf9;
+  g->bg_palette_index = g->obj_palette_index = 0;
   g->mem[0xff00] = 0xcf;
   g->mem[0xff44] = 0;
   memset(g->mem + 0xff10, 0, 0x17);
