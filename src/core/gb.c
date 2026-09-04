@@ -3,7 +3,7 @@
 #include <string.h>
 
 /* Invalid SM83 opcodes are intentionally treated as NOPs in Phase 1. */
-#define STATE_VERSION 5u
+#define STATE_VERSION 6u
 #define STATE_HEADER_SIZE 24u
 struct gb {
   uint8_t *rom, *ram, mem[65536];
@@ -18,6 +18,8 @@ struct gb {
       dma_active, timer_signal, rtc_select, rtc_latched_valid, rtc[5],
       rtc_latched[5], vbk, svbk, bg_palette_index, obj_palette_index;
   uint16_t rom_bank;
+  uint16_t hdma_source, hdma_dest;
+  uint8_t hdma5;
   unsigned ppu_cycles;
   unsigned dma_cycles;
   uint32_t audio_phase[4];
@@ -47,6 +49,15 @@ static void audio_frame(gb_t *);
 static unsigned vram_bank(const gb_t *g) { return g->model == GB_MODEL_CGB ? g->vbk & 1 : 0; }
 static unsigned wram_bank(const gb_t *g) {
   return g->model == GB_MODEL_CGB ? (g->svbk & 7 ? g->svbk & 7 : 1) : 1;
+}
+static void cgb_gdma(gb_t *g, unsigned blocks) {
+  for (unsigned block = 0; block < blocks; block++)
+    for (unsigned i = 0; i < 0x10; i++)
+      g->vram[g->vbk & 1][(g->hdma_dest + block * 0x10 + i) & 0x1fff] =
+          rd(g, (uint16_t)(g->hdma_source + block * 0x10 + i));
+  g->hdma_source = (uint16_t)(g->hdma_source + blocks * 0x10);
+  g->hdma_dest = (uint16_t)(g->hdma_dest + blocks * 0x10);
+  g->hdma5 = 0xff;
 }
 static uint8_t audio_read(const gb_t *g, uint16_t a) {
   if (a == 0xff26)
@@ -290,6 +301,8 @@ static uint8_t rd(const gb_t *g, uint16_t a) {
     const uint8_t index = a == 0xff69 ? g->bg_palette_index : g->obj_palette_index;
     return palette[index & 0x3f];
   }
+  if (a >= 0xff51 && a <= 0xff55)
+    return a == 0xff55 ? g->hdma5 : g->mem[a];
   return a == 0xff00 ? jp(g) : g->mem[a];
 }
 static void wr(gb_t *g, uint16_t a, uint8_t v) {
@@ -407,6 +420,22 @@ static void wr(gb_t *g, uint16_t a, uint8_t v) {
   if (a == 0xff70) {
     g->mem[a] = (uint8_t)(0xf8 | (v & 7));
     g->svbk = v & 7;
+    return;
+  }
+  if (a >= 0xff51 && a <= 0xff54) {
+    g->mem[a] = v;
+    if (a == 0xff51) g->hdma_source = (uint16_t)((v << 8) | (g->hdma_source & 0x00f0));
+    if (a == 0xff52) g->hdma_source = (uint16_t)((g->hdma_source & 0xff00) | (v & 0xf0));
+    if (a == 0xff53) g->hdma_dest = (uint16_t)(0x8000 | ((v & 0x1f) << 8) | (g->hdma_dest & 0x00f0));
+    if (a == 0xff54) g->hdma_dest = (uint16_t)((g->hdma_dest & 0xff00) | (v & 0xf0));
+    return;
+  }
+  if (a == 0xff55) {
+    if (v & 0x80) {
+      g->hdma5 = v & 0x7f;
+      return;
+    }
+    cgb_gdma(g, (v & 0x7f) + 1);
     return;
   }
   if (a == 0xff68 || a == 0xff6a) {
@@ -1103,7 +1132,7 @@ int gb_load_ram(gb_t *g, const uint8_t *data, size_t n) {
 }
 size_t gb_save_state_size(const gb_t *g) {
   return g ? STATE_HEADER_SIZE + 0x10000u + sizeof g->vram + sizeof g->wram +
-                     0xa0u + sizeof g->fb + sizeof g->bg_line + 214u + g->ram_size
+                      0xa0u + sizeof g->fb + sizeof g->bg_line + 219u + g->ram_size
            : 0;
 }
 size_t gb_save_state(const gb_t *g, uint8_t *out) {
@@ -1168,6 +1197,9 @@ size_t gb_save_state(const gb_t *g, uint8_t *out) {
   memcpy(p, g->rtc_latched, sizeof g->rtc_latched);
   p += sizeof g->rtc_latched;
   put32(&p, (uint32_t)g->model);
+  put16(&p, g->hdma_source);
+  put16(&p, g->hdma_dest);
+  *p++ = g->hdma5;
   *p++ = g->vbk;
   *p++ = g->svbk;
   *p++ = g->bg_palette_index;
@@ -1241,6 +1273,9 @@ int gb_load_state(gb_t *g, const uint8_t *data, size_t n) {
   memcpy(g->rtc_latched, p, sizeof g->rtc_latched);
   p += sizeof g->rtc_latched;
   g->model = (gb_model_t)get32(&p);
+  g->hdma_source = get16(&p);
+  g->hdma_dest = get16(&p);
+  g->hdma5 = *p++;
   g->vbk = *p++;
   g->svbk = *p++;
   g->bg_palette_index = *p++;
@@ -1275,6 +1310,8 @@ void gb_reset(gb_t *g) {
   g->dma_cycles = 0;
   g->vbk = 0;
   g->svbk = 1;
+  g->hdma_source = g->hdma_dest = 0;
+  g->hdma5 = 0xff;
   g->mem[0xff04] = 0;
   g->mem[0xff05] = 0;
   g->mem[0xff06] = 0;
