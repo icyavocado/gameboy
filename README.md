@@ -16,5 +16,8 @@ standalone debugger-oriented terminal frontend. Enable the SDL side-by-side
 debug mode with `cmake -S . -B build -DGB_ENABLE_TUI=ON` and
 `build/gb-sdl --debug game.gb`.
 
+The SDL frontend loads and saves battery RAM beside the ROM as `game.gb.sav`.
+Press `F5` to save a state to `game.gb.state` and `F8` to restore it.
+
 DMG CPU, cartridge, PPU, APU, CGB, persistence, link cable, and full debugger
 support are being implemented according to `SPEC.md`.
