@@ -356,6 +356,58 @@ UTEST(core, mbc3_and_mbc5_bank_switching) {
   gb_destroy(g);
 }
 
+UTEST(core, mbc3_rtc_progression_and_state) {
+  static uint8_t rom[0x10000];
+  memset(rom, 0, sizeof rom);
+  rom[0x147] = 0x10;
+  rom[0x149] = 3;
+  gb_t *g = gb_create();
+  ASSERT_EQ(gb_load_rom(g, rom, sizeof rom), 0);
+  gb_dbg_write(g, 0x0000, 0x0a);
+  gb_dbg_write(g, 0x4000, 0x08);
+  gb_dbg_write(g, 0xa000, 59);
+  gb_dbg_write(g, 0x4000, 0x09);
+  gb_dbg_write(g, 0xa000, 59);
+  gb_dbg_write(g, 0x4000, 0x0a);
+  gb_dbg_write(g, 0xa000, 23);
+  gb_dbg_write(g, 0x4000, 0x0b);
+  gb_dbg_write(g, 0xa000, 0xff);
+  gb_dbg_write(g, 0x4000, 0x0c);
+  gb_dbg_write(g, 0xa000, 0);
+  step(g, 1048576);
+  gb_dbg_write(g, 0x4000, 0x08);
+  ASSERT_EQ(gb_dbg_read(g, 0xa000), 0);
+  gb_dbg_write(g, 0x4000, 0x09);
+  ASSERT_EQ(gb_dbg_read(g, 0xa000), 0);
+  gb_dbg_write(g, 0x4000, 0x0a);
+  ASSERT_EQ(gb_dbg_read(g, 0xa000), 0);
+  gb_dbg_write(g, 0x4000, 0x0b);
+  ASSERT_EQ(gb_dbg_read(g, 0xa000), 0);
+  gb_dbg_write(g, 0x4000, 0x0c);
+  ASSERT_EQ(gb_dbg_read(g, 0xa000), 1);
+
+  gb_dbg_write(g, 0x6000, 0);
+  gb_dbg_write(g, 0x6000, 1);
+  gb_dbg_write(g, 0x4000, 0x08);
+  ASSERT_EQ(gb_dbg_read(g, 0xa000), 0);
+  gb_dbg_write(g, 0x4000, 0x0c);
+  gb_dbg_write(g, 0xa000, 0x40);
+  gb_dbg_write(g, 0x4000, 0x08);
+  step(g, 1048576);
+  ASSERT_EQ(gb_dbg_read(g, 0xa000), 0);
+
+  size_t n = gb_save_state_size(g);
+  uint8_t *state = malloc(n);
+  ASSERT_TRUE(state);
+  ASSERT_EQ(gb_save_state(g, state), n);
+  gb_dbg_write(g, 0x4000, 0x08);
+  gb_dbg_write(g, 0xa000, 42);
+  ASSERT_EQ(gb_load_state(g, state, n), 0);
+  ASSERT_EQ(gb_dbg_read(g, 0xa000), 0);
+  free(state);
+  gb_destroy(g);
+}
+
 UTEST(core, mbc2_nibble_ram_and_banking) {
   static uint8_t rom[0x40000];
   memset(rom, 0, sizeof rom);
@@ -785,6 +837,7 @@ int main(void) {
   core_linked_serial_master_clocks_external_peer();
   core_mbc1_bank_switching();
   core_mbc3_and_mbc5_bank_switching();
+  core_mbc3_rtc_progression_and_state();
   core_mbc2_nibble_ram_and_banking();
   core_wram_echo();
   core_cgb_vram_wram_banking_and_state();
@@ -806,6 +859,6 @@ int main(void) {
   core_oam_dma_transfer();
   core_timer_uses_divider_edges();
   ppu_stat_write_rechecks_coincidence();
-  puts("20 tests passed");
+  puts("21 tests passed");
   return 0;
 }

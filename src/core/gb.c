@@ -4,7 +4,7 @@
 #include <string.h>
 
 /* Invalid SM83 opcodes are intentionally treated as NOPs in Phase 1. */
-#define STATE_VERSION 7u
+#define STATE_VERSION 8u
 #define STATE_HEADER_SIZE 24u
 #define MAX_BREAKPOINTS 16u
 struct gb {
@@ -26,6 +26,7 @@ struct gb {
   uint16_t serial_cycles;
   unsigned ppu_cycles;
   unsigned dma_cycles;
+  uint32_t rtc_cycles;
   uint32_t audio_phase[4];
   uint16_t noise_lfsr;
   uint8_t audio_enabled[4];
@@ -54,6 +55,22 @@ static void ppu_tick(gb_t *);
 static void ppu_stat(gb_t *);
 static void audio_trigger(gb_t *, unsigned);
 static void audio_frame(gb_t *);
+static void rtc_second(gb_t *g) {
+  uint8_t day_high = g->rtc[4];
+  if (day_high & 0x40) return;
+  if (++g->rtc[0] < 60) return;
+  g->rtc[0] = 0;
+  if (++g->rtc[1] < 60) return;
+  g->rtc[1] = 0;
+  if (++g->rtc[2] < 24) return;
+  g->rtc[2] = 0;
+  if (++g->rtc[3] != 0) return;
+  if (day_high & 1) {
+    g->rtc[4] = (uint8_t)(day_high | 0x80);
+  } else {
+    g->rtc[4] = (uint8_t)(day_high | 1);
+  }
+}
 static unsigned vram_bank(const gb_t *g) { return g->model == GB_MODEL_CGB ? g->vbk & 1 : 0; }
 static unsigned wram_bank(const gb_t *g) {
   return g->model == GB_MODEL_CGB ? (g->svbk & 7 ? g->svbk & 7 : 1) : 1;
@@ -333,7 +350,7 @@ static uint8_t rd(const gb_t *g, uint16_t a) {
                : 0xff;
   if (a >= 0xa000 && a < 0xc000 && g->ram && g->ram_enable) {
     if (g->mbc == 3 && g->rtc_select >= 8 && g->rtc_select <= 12)
-      return g->rtc_latched[g->rtc_select - 8];
+      return (g->rtc_latched_valid ? g->rtc_latched : g->rtc)[g->rtc_select - 8];
     return g->ram[((size_t)(g->mbc == 1 && g->mode ? g->ram_bank :
                              g->mbc == 5 ? g->ram_bank : 0) *
                     0x2000 + a - 0xa000) % g->ram_size];
@@ -451,7 +468,8 @@ static void wr(gb_t *g, uint16_t a, uint8_t v) {
       return;
     }
     if (g->mbc == 3 && g->rtc_select >= 8 && g->rtc_select <= 12) {
-      g->rtc[g->rtc_select - 8] = v;
+      unsigned reg = g->rtc_select - 8;
+      g->rtc[reg] = reg == 4 ? (uint8_t)(v & 0xc1) : v;
       return;
     }
     g->ram[((size_t)(g->mbc == 1 && g->mode ? g->ram_bank :
@@ -845,6 +863,10 @@ static void ppu_tick(gb_t *g) {
 }
 static void tick(gb_t *g, unsigned n) {
   while (n--) {
+    if (g->mbc == 3 && ++g->rtc_cycles == 4194304u) {
+      g->rtc_cycles = 0;
+      rtc_second(g);
+    }
     unsigned old = timer_level(g);
     g->divider++;
     g->div = (uint8_t)(g->divider >> 8);
@@ -1300,7 +1322,7 @@ int gb_load_ram(gb_t *g, const uint8_t *data, size_t n) {
 }
 size_t gb_save_state_size(const gb_t *g) {
   return g ? STATE_HEADER_SIZE + 0x10000u + sizeof g->vram + sizeof g->wram +
-                       0xa0u + sizeof g->fb + sizeof g->bg_line + 226u + g->ram_size
+                        0xa0u + sizeof g->fb + sizeof g->bg_line + 230u + g->ram_size
            : 0;
 }
 size_t gb_save_state(const gb_t *g, uint8_t *out) {
@@ -1364,6 +1386,7 @@ size_t gb_save_state(const gb_t *g, uint8_t *out) {
   p += sizeof g->rtc;
   memcpy(p, g->rtc_latched, sizeof g->rtc_latched);
   p += sizeof g->rtc_latched;
+  put32(&p, g->rtc_cycles);
   put32(&p, (uint32_t)g->model);
   *p++ = g->key1;
   *p++ = g->opri;
@@ -1446,6 +1469,7 @@ int gb_load_state(gb_t *g, const uint8_t *data, size_t n) {
   p += sizeof g->rtc;
   memcpy(g->rtc_latched, p, sizeof g->rtc_latched);
   p += sizeof g->rtc_latched;
+  g->rtc_cycles = get32(&p);
   g->model = (gb_model_t)get32(&p);
   g->key1 = *p++;
   g->opri = *p++;
@@ -1482,6 +1506,7 @@ void gb_reset(gb_t *g) {
   g->ram_bank = g->upper = g->mode = 0;
   g->div = 0;
   g->divider = g->timer = 0;
+  g->rtc_cycles = 0;
   g->timer_signal = 0;
   g->ppu_cycles = 0;
   g->ppu_mode = 2;
