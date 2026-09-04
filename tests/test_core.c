@@ -602,6 +602,16 @@ UTEST(core, cgb_speed_switch) {
   gb_dbg_step(g);
   ASSERT_EQ(gb_dbg_read(g, 0xff4d), 0xfe);
   ASSERT_TRUE(!regs(g).halted);
+  size_t state_size = gb_save_state_size(g);
+  uint8_t *state = malloc(state_size);
+  ASSERT_TRUE(state);
+  ASSERT_EQ(gb_save_state(g, state), state_size);
+  gb_dbg_write(g, 0xff4d, 1);
+  gb_dbg_step(g);
+  ASSERT_EQ(gb_dbg_read(g, 0xff4d), 0x7e);
+  ASSERT_EQ(gb_load_state(g, state, state_size), 0);
+  ASSERT_EQ(gb_dbg_read(g, 0xff4d), 0xfe);
+  free(state);
   gb_dbg_step(g);
   ASSERT_TRUE(regs(g).halted);
   gb_destroy(g);

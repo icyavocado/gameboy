@@ -4,7 +4,7 @@
 #include <string.h>
 
 /* Invalid SM83 opcodes are intentionally treated as NOPs in Phase 1. */
-#define STATE_VERSION 8u
+#define STATE_VERSION 9u
 #define STATE_HEADER_SIZE 24u
 #define MAX_BREAKPOINTS 16u
 #define RTC_SAVE_SIZE 24u
@@ -20,7 +20,7 @@ struct gb {
       ram_enable, upper, mode, ppu_mode, stat_signal, dma_page, dma_index,
       dma_active, timer_signal, rtc_select, rtc_latched_valid, rtc[5],
       rtc_latched[5], vbk, svbk, bg_palette_index, obj_palette_index, key1, opri,
-      ir, serial_active, boot_enabled;
+      ir, serial_active, boot_enabled, double_speed;
   uint16_t rom_bank;
   uint16_t hdma_source, hdma_dest;
   uint8_t hdma5;
@@ -1067,6 +1067,7 @@ int gb_dbg_step(gb_t *g) {
     if (g->model == GB_MODEL_CGB && (g->key1 & 1)) {
       g->key1 ^= 0x80;
       g->key1 &= 0x80;
+      g->double_speed = (uint8_t)(g->key1 != 0);
     } else {
       g->halted = 1;
     }
@@ -1201,7 +1202,7 @@ int gb_dbg_step(gb_t *g) {
 done:
   if (g->ei_delay && !--g->ei_delay)
     g->ime = 1;
-  tick(g, (unsigned)c);
+  tick(g, (unsigned)(g->double_speed ? c / 2 : c));
   return c;
 }
 void gb_dbg_enable(gb_t *g, bool enabled) { if (g) g->debug_enabled = enabled; }
@@ -1243,7 +1244,7 @@ void gb_dbg_del_bp(gb_t *g, int id) {
 }
 void gb_run_frame(gb_t *g) {
   unsigned n = 0;
-  while (n < 70224)
+  while (n < (g->double_speed ? 140448u : 70224u))
     n += (unsigned)gb_dbg_step(g);
   audio_frame(g);
 }
@@ -1358,7 +1359,7 @@ int gb_load_ram(gb_t *g, const uint8_t *data, size_t n) {
 }
 size_t gb_save_state_size(const gb_t *g) {
   return g ? STATE_HEADER_SIZE + 0x10000u + sizeof g->vram + sizeof g->wram +
-                        0xa0u + sizeof g->fb + sizeof g->bg_line + 230u + g->ram_size
+                        0xa0u + sizeof g->fb + sizeof g->bg_line + 231u + g->ram_size
            : 0;
 }
 size_t gb_save_state(const gb_t *g, uint8_t *out) {
@@ -1430,6 +1431,7 @@ size_t gb_save_state(const gb_t *g, uint8_t *out) {
   *p++ = g->serial_active;
   put16(&p, g->serial_cycles);
   *p++ = g->boot_enabled;
+  *p++ = g->double_speed;
   put16(&p, g->hdma_source);
   put16(&p, g->hdma_dest);
   *p++ = g->hdma5;
@@ -1513,6 +1515,7 @@ int gb_load_state(gb_t *g, const uint8_t *data, size_t n) {
   g->serial_active = *p++;
   g->serial_cycles = get16(&p);
   g->boot_enabled = *p++;
+  g->double_speed = *p++;
   g->hdma_source = get16(&p);
   g->hdma_dest = get16(&p);
   g->hdma5 = *p++;
@@ -1560,6 +1563,7 @@ void gb_reset(gb_t *g) {
   g->svbk = 1;
   g->hdma_source = g->hdma_dest = 0;
   g->hdma5 = 0xff;
+  g->double_speed = 0;
   g->serial_active = 0;
   g->serial_cycles = 0;
   g->boot_enabled = g->boot_rom != NULL;
