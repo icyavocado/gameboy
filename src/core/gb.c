@@ -35,7 +35,7 @@ struct gb {
   gb_audio_cb audio;
   void *audio_user;
   gb_bp_t breakpoints[MAX_BREAKPOINTS];
-  uint8_t breakpoint_used[MAX_BREAKPOINTS], debug_enabled;
+  uint8_t breakpoint_used[MAX_BREAKPOINTS], debug_enabled, watch_hit, debug_fetch;
 };
 static uint8_t lo(uint16_t x) { return (uint8_t)x; }
 static uint8_t hi(uint16_t x) { return (uint8_t)(x >> 8); }
@@ -204,7 +204,9 @@ static uint16_t addsp(gb_t *g, int8_t offset) {
   return (uint16_t)(sp + offset);
 }
 static uint8_t fc(gb_t *g) {
+  g->debug_fetch = 1;
   uint8_t v = rd(g, g->pc);
+  g->debug_fetch = 0;
   if (!g->halt_bug)
     g->pc++;
   else
@@ -276,6 +278,11 @@ static uint8_t jp(const gb_t *g) {
   return (uint8_t)(0xc0 | s | v);
 }
 static uint8_t rd(const gb_t *g, uint16_t a) {
+  if (g->debug_enabled && !g->debug_fetch)
+    for (unsigned i = 0; i < MAX_BREAKPOINTS; i++)
+      if (g->breakpoint_used[i] && g->breakpoints[i].kind == GB_BP_READ &&
+          g->breakpoints[i].addr == a)
+        ((gb_t *)g)->watch_hit = (uint8_t)(i + 1);
   if (g->boot_enabled && a < 0x100)
     return g->boot_rom[a];
   if (g->boot_enabled && g->model == GB_MODEL_CGB && a >= 0x200 && a < 0x900)
@@ -329,6 +336,11 @@ static uint8_t rd(const gb_t *g, uint16_t a) {
   return a == 0xff00 ? jp(g) : g->mem[a];
 }
 static void wr(gb_t *g, uint16_t a, uint8_t v) {
+  if (g->debug_enabled)
+    for (unsigned i = 0; i < MAX_BREAKPOINTS; i++)
+      if (g->breakpoint_used[i] && g->breakpoints[i].kind == GB_BP_WRITE &&
+          g->breakpoints[i].addr == a)
+        g->watch_hit = (uint8_t)(i + 1);
   if (a >= 0xe000 && a < 0xfe00)
     a = (uint16_t)(a - 0x2000);
   if (a >= 0xc000 && a < 0xd000) {
@@ -1147,6 +1159,7 @@ int gb_dbg_run_until_break(gb_t *g) {
   if (!g)
     return -1;
   unsigned cycles = 0;
+  g->watch_hit = 0;
   while (cycles < 70224) {
     if (g->debug_enabled)
       for (unsigned i = 0; i < MAX_BREAKPOINTS; i++)
@@ -1154,11 +1167,13 @@ int gb_dbg_run_until_break(gb_t *g) {
             g->breakpoints[i].addr == g->pc)
           return (int)i;
     cycles += (unsigned)gb_dbg_step(g);
+    if (g->watch_hit)
+      return g->watch_hit - 1;
   }
   return -1;
 }
 int gb_dbg_add_bp(gb_t *g, gb_bp_t breakpoint) {
-  if (!g || breakpoint.kind != GB_BP_PC)
+  if (!g || breakpoint.kind > GB_BP_WRITE)
     return -1;
   for (unsigned i = 0; i < MAX_BREAKPOINTS; i++)
     if (!g->breakpoint_used[i]) {

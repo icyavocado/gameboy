@@ -153,6 +153,19 @@ UTEST(core, debugger_disassembly) {
   gb_destroy(g);
 }
 
+UTEST(core, debugger_memory_watchpoints) {
+  gb_t *g = load((const uint8_t[]){0x3e, 0x42, 0xea, 0x00, 0xc0, 0xfa, 0x00, 0xc0}, 8);
+  int write_id = gb_dbg_add_bp(g, (gb_bp_t){GB_BP_WRITE, 0xc000});
+  int read_id = gb_dbg_add_bp(g, (gb_bp_t){GB_BP_READ, 0xc000});
+  gb_dbg_enable(g, true);
+  ASSERT_EQ(gb_dbg_run_until_break(g), write_id);
+  ASSERT_EQ(gb_dbg_read(g, 0xc000), 0x42);
+  gb_dbg_del_bp(g, write_id);
+  ASSERT_EQ(gb_dbg_run_until_break(g), read_id);
+  gb_dbg_del_bp(g, read_id);
+  gb_destroy(g);
+}
+
 UTEST(core, ei_delay_interrupt_and_halt) {
   static const uint8_t code[] = {0xfb, 0x00, 0x76};
   gb_t *g = load(code, sizeof code);
@@ -690,6 +703,7 @@ int main(void) {
   core_jumps_call_ret_and_stack();
   core_debugger_pc_breakpoints();
   core_debugger_disassembly();
+  core_debugger_memory_watchpoints();
   core_optional_boot_rom_mapping();
   core_ei_delay_interrupt_and_halt();
   core_timer_overflow_and_reset_state();
