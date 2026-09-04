@@ -361,6 +361,24 @@ UTEST(core, cgb_speed_switch) {
   gb_destroy(g);
 }
 
+UTEST(core, cgb_infrared_register) {
+  static uint8_t rom[0x8000];
+  memset(rom, 0, sizeof rom);
+  rom[0x143] = 0xc0;
+  gb_t *g = gb_create();
+  ASSERT_EQ(gb_load_rom(g, rom, sizeof rom), 0);
+  ASSERT_EQ(gb_dbg_read(g, 0xff56), 0x3c);
+  gb_dbg_write(g, 0xff56, 0xff);
+  ASSERT_EQ(gb_dbg_read(g, 0xff56), 0x3f);
+  gb_destroy(g);
+
+  g = load((const uint8_t[]){0x00}, 1);
+  ASSERT_EQ(gb_dbg_read(g, 0xff56), 0xff);
+  gb_dbg_write(g, 0xff56, 3);
+  ASSERT_EQ(gb_dbg_read(g, 0xff56), 0xff);
+  gb_destroy(g);
+}
+
 UTEST(ppu, cgb_tile_attributes_and_palette) {
   static uint8_t rom[0x8000];
   memset(rom, 0, sizeof rom);
@@ -624,6 +642,7 @@ int main(void) {
   core_cgb_general_dma();
   core_cgb_hblank_dma();
   core_cgb_speed_switch();
+  core_cgb_infrared_register();
   ppu_cgb_tile_attributes_and_palette();
   ppu_cgb_bg_priority_and_opri();
   ppu_background_tile();
