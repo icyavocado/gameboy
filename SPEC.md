@@ -119,7 +119,7 @@ void    gb_dbg_regs(const gb_t*, gb_regs_t* out);
 | # | Phase | Scope | Exit criteria |
 |---|---|---|---|
 | 0 | Skeleton | git init, CMake with all targets + `GB_ENABLE_TUI`, `gb_t` skeleton, blank 160x144 SDL window, headless stub, `utest.h` wired to `ctest`, `fetch_roms.sh`, CI | All targets build, one passing unit test, CI green, ROMs fetched |
-| 1 | CPU + memory | Header parsing, ROM-only + MBC1, full SM83 set via generated table, IME/IE/IF, EI delay, HALT bug, timer, joypad, serial stub to stdout | Blargg `cpu_instrs` 11/11, `instr_timing`, `mem_timing` pass headless; unit tests for DAA, ADD SP, flags |
+| 1 | CPU + memory | Header parsing, Nintendo logo check, ROM-only + MBC1, full SM83 set via generated table, IME/IE/IF, EI delay, HALT bug, timer, joypad, serial stub to stdout | Blargg `cpu_instrs` 11/11, `instr_timing`, `mem_timing` pass headless; unit tests for DAA, ADD SP, flags |
 | 2 | PPU (DMG) | Mode state machine, STAT IRQs, LY/LYC, scanline renderer (BG/window/sprites, priority), upgrade to pixel FIFO, OAM DMA | dmg-acid2 pixel-perfect; Tetris, Dr. Mario, Link's Awakening, Pokemon Red playable; Mooneye `ppu/`, `timer/` mostly green |
 | 3 | Cart + persistence | MBC2, MBC3+RTC, MBC5, large banking; `.sav` next to ROM (on exit + periodic), RTC persisted; versioned save states with slots, F5/F8 hotkeys | Mooneye `emulator-only/mbc*` pass; saves/states round-trip (unit tested); Pokemon saves survive restart |
 | 4 | APU | Square1 (sweep), Square2, Wave, Noise; 512 Hz frame sequencer; length/envelope; NR50-52; DAC on/off; downsample to 48 kHz stereo int16 ring buffer; `SDL_QueueAudio`; audio-driven sync | Blargg `dmg_sound` mostly pass; no crackle |
@@ -171,6 +171,7 @@ Single thread. Per iteration: poll SDL events -> if running, `gb_run_frame()` (o
 
 - **Pixel FIFO vs scanline PPU**: scanline covers ~95% of games; FIFO needed for dmg-acid2 window edge cases. Start scanline, refactor to FIFO within Phase 2 when tests demand it.
 - **Boot ROM not redistributable**: default to skip-boot with correct post-boot registers; optional user-supplied files.
+- **Cartridge logo check**: verify the Nintendo logo at `$0104-$0133` for boot-flow compatibility, but keep loading permissive for homebrew and diagnostics.
 - **Save state portability**: `gb_t` pointer-free, fixed-width types, little-endian header with version + model.
 - **Audio timing**: audio-driven sync from day one of Phase 4, not vsync-driven.
 - **`-Werror` + generated code**: `gen_opcodes.pl` must emit warning-free code; commit generated `opcodes.c`.

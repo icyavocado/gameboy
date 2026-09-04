@@ -15,6 +15,26 @@ static gb_t *load(const uint8_t *code, size_t length) {
   return g;
 }
 
+UTEST(core, nintendo_logo_check_is_permissive) {
+  static const uint8_t logo[48] = {
+      0xce, 0xed, 0x66, 0x66, 0xcc, 0x0d, 0x00, 0x0b,
+      0x03, 0x73, 0x00, 0x83, 0x00, 0x0c, 0x00, 0x0d,
+      0x00, 0x08, 0x11, 0x1f, 0x88, 0x89, 0x00, 0x0e,
+      0xdc, 0xcc, 0x6e, 0xe6, 0xdd, 0xdd, 0xd9, 0x99,
+      0xbb, 0xbb, 0x67, 0x63, 0x6e, 0x0e, 0xec, 0xcc,
+      0xdd, 0xdc, 0x99, 0x9f, 0xbb, 0xb9, 0x33, 0x3e};
+  static uint8_t rom[0x8000];
+  memset(rom, 0, sizeof rom);
+  memcpy(rom + 0x104, logo, sizeof logo);
+  gb_t *g = gb_create();
+  ASSERT_EQ(gb_load_rom(g, rom, sizeof rom), 0);
+  ASSERT_TRUE(gb_rom_logo_valid(g));
+  rom[0x104] ^= 1;
+  ASSERT_EQ(gb_load_rom(g, rom, sizeof rom), 0);
+  ASSERT_TRUE(!gb_rom_logo_valid(g));
+  gb_destroy(g);
+}
+
 static void step(gb_t *g, unsigned count) {
   while (count--)
     gb_dbg_step(g);
@@ -732,6 +752,17 @@ UTEST(ppu, background_tile) {
   gb_destroy(g);
 }
 
+UTEST(ppu, signed_background_tile_data) {
+  gb_t *g = load((const uint8_t[]){0x76}, 1);
+  gb_dbg_write(g, 0x8800, 0x80);
+  gb_dbg_write(g, 0x8801, 0x00);
+  gb_dbg_write(g, 0x9800, 0x80);
+  gb_dbg_write(g, 0xff40, 0x91 & (uint8_t)~0x10);
+  gb_run_frame(g);
+  ASSERT_EQ(gb_framebuffer(g)[0], 0xffa8a8a8);
+  gb_destroy(g);
+}
+
 UTEST(ppu, lcd_timing_and_interrupts) {
   gb_t *g = load((const uint8_t[]){0x76}, 1);
   gb_dbg_write(g, 0xff41, 0x60);
@@ -911,6 +942,7 @@ UTEST(ppu, stat_write_rechecks_coincidence) {
 }
 
 int main(void) {
+  core_nintendo_logo_check_is_permissive();
   core_immediate_and_register_loads();
   core_alu_flags_and_daa();
   core_compare_preserves_accumulator();
@@ -942,6 +974,7 @@ int main(void) {
   ppu_cgb_tile_attributes_and_palette();
   ppu_cgb_bg_priority_and_opri();
   ppu_background_tile();
+  ppu_signed_background_tile_data();
   ppu_lcd_timing_and_interrupts();
   ppu_sprite_rendering();
   core_battery_ram_round_trip();
@@ -953,6 +986,6 @@ int main(void) {
   core_oam_dma_transfer();
   core_timer_uses_divider_edges();
   ppu_stat_write_rechecks_coincidence();
-  puts("21 tests passed");
+  puts("23 tests passed");
   return 0;
 }

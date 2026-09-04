@@ -10,6 +10,13 @@
 #define RTC_SAVE_SIZE 24u
 #define AUDIO_RATE 48000u
 #define AUDIO_CLOCK 4194304u
+static const uint8_t nintendo_logo[48] = {
+    0xce, 0xed, 0x66, 0x66, 0xcc, 0x0d, 0x00, 0x0b,
+    0x03, 0x73, 0x00, 0x83, 0x00, 0x0c, 0x00, 0x0d,
+    0x00, 0x08, 0x11, 0x1f, 0x88, 0x89, 0x00, 0x0e,
+    0xdc, 0xcc, 0x6e, 0xe6, 0xdd, 0xdd, 0xd9, 0x99,
+    0xbb, 0xbb, 0x67, 0x63, 0x6e, 0x0e, 0xec, 0xcc,
+    0xdd, 0xdc, 0x99, 0x9f, 0xbb, 0xb9, 0x33, 0x3e};
 struct gb {
   uint8_t *rom, *ram, *boot_rom, mem[65536];
   uint8_t vram[2][0x2000], wram[8][0x1000], oam[0xa0];
@@ -813,7 +820,8 @@ static uint32_t cgb_color(const uint8_t *palette, unsigned index) {
 }
 static uint8_t tile_pixel(const gb_t *g, int tile, unsigned row, unsigned col,
                           unsigned bank) {
-  size_t a = (size_t)((tile & 255) * 16 + row * 2);
+  int base = tile >= 384 ? 0x1000 + (tile - 512) * 16 : tile * 16;
+  size_t a = (size_t)(base + (int)(row * 2));
   uint8_t lo = g->vram[bank][a & 0x1fff], hi = g->vram[bank][(a + 1) & 0x1fff];
   return (uint8_t)(((hi >> (7 - col)) & 1) * 2 + ((lo >> (7 - col)) & 1));
 }
@@ -835,7 +843,7 @@ static void ppu_line(gb_t *g, unsigned y) {
                                                         ? g->vram[1][map + ty * 32 + tx]
                                                         : 0;
     uint8_t pal = g->mem[0xff47];
-    int tile = (lcdc & 0x10) ? t : (int8_t)t + 256;
+     int tile = (lcdc & 0x10) ? t : (int8_t)t + 512;
     unsigned row = py & 7, col = px & 7;
     if (g->model == GB_MODEL_CGB) {
       if (attr & 0x20) col = 7 - col;
@@ -1391,6 +1399,10 @@ int gb_load_rom(gb_t *g, const uint8_t *r, size_t n) {
   gb_reset(g);
   return 0;
 }
+bool gb_rom_logo_valid(const gb_t *g) {
+  return g && g->rom && g->rom_size >= 0x134 &&
+         memcmp(g->rom + 0x104, nintendo_logo, sizeof nintendo_logo) == 0;
+}
 int gb_load_boot_rom(gb_t *g, const uint8_t *rom, size_t n) {
   if (!g || !rom || (n != 0x100 && n != 0x900))
     return -1;
@@ -1456,7 +1468,7 @@ int gb_load_ram(gb_t *g, const uint8_t *data, size_t n) {
 }
 size_t gb_save_state_size(const gb_t *g) {
   return g ? STATE_HEADER_SIZE + 0x10000u + sizeof g->vram + sizeof g->wram +
-                        0xa0u + sizeof g->fb + sizeof g->bg_line + 235u + g->ram_size
+                         0xa0u + sizeof g->fb + sizeof g->bg_line + 235u + g->ram_size
            : 0;
 }
 size_t gb_save_state(const gb_t *g, uint8_t *out) {
@@ -1510,7 +1522,7 @@ size_t gb_save_state(const gb_t *g, uint8_t *out) {
   *p++ = g->dma_index;
   *p++ = g->dma_active;
   put16(&p, g->timer);
-  put32(&p, g->ppu_cycles);
+   put32(&p, g->ppu_cycles);
   put32(&p, g->dma_cycles);
   put16(&p, g->divider);
   *p++ = g->timer_signal;
@@ -1595,7 +1607,7 @@ int gb_load_state(gb_t *g, const uint8_t *data, size_t n) {
   g->dma_index = *p++;
   g->dma_active = *p++;
   g->timer = get16(&p);
-  g->ppu_cycles = get32(&p);
+   g->ppu_cycles = get32(&p);
   g->dma_cycles = get32(&p);
   g->divider = get16(&p);
   g->timer_signal = *p++;
