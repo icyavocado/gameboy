@@ -34,6 +34,17 @@ static void serial_callback(void *unused, uint8_t out, uint8_t *in) {
   serial_received = out;
   *in = 0xa5;
 }
+static unsigned audio_calls;
+static size_t audio_frames;
+static int16_t audio_peak;
+static void audio_callback(void *unused, const int16_t *stereo, size_t frames) {
+  (void)unused;
+  audio_calls++;
+  audio_frames += frames;
+  for (size_t i = 0; i < frames * 2; i++)
+    if (stereo[i] > audio_peak)
+      audio_peak = stereo[i];
+}
 
 UTEST(core, immediate_and_register_loads) {
   static const uint8_t code[] = {
@@ -294,6 +305,27 @@ UTEST(core, save_state_round_trip) {
   gb_destroy(g);
 }
 
+UTEST(core, apu_square_channel) {
+  gb_t *g = load((const uint8_t[]){0x00}, 1);
+  audio_calls = 0;
+  audio_frames = 0;
+  audio_peak = 0;
+  gb_set_audio_callback(g, audio_callback, NULL);
+  gb_dbg_write(g, 0xff26, 0x80);
+  gb_dbg_write(g, 0xff11, 0x80);
+  gb_dbg_write(g, 0xff12, 0xf0);
+  gb_dbg_write(g, 0xff13, 0x00);
+  gb_dbg_write(g, 0xff14, 0x87);
+  gb_dbg_write(g, 0xff24, 0x77);
+  gb_dbg_write(g, 0xff25, 0x11);
+  ASSERT_TRUE(gb_dbg_read(g, 0xff26) & 1);
+  gb_run_frame(g);
+  ASSERT_EQ(audio_calls, 1);
+  ASSERT_EQ(audio_frames, 735);
+  ASSERT_TRUE(audio_peak > 0);
+  gb_destroy(g);
+}
+
 UTEST(core, extended_control_and_stack_opcodes) {
   static const uint8_t code[] = {
       0x01, 0x34, 0x12, 0x21, 0x00, 0x10, 0x09, 0x0b, 0xc5,
@@ -372,6 +404,7 @@ int main(void) {
   ppu_sprite_rendering();
   core_battery_ram_round_trip();
   core_save_state_round_trip();
+  core_apu_square_channel();
   core_extended_control_and_stack_opcodes();
   core_conditional_relative_and_signed_stack_arithmetic();
   core_oam_dma_transfer();
