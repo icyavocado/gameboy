@@ -620,7 +620,7 @@ static void alu(gb_t *g, unsigned n, uint8_t v) {
   uint8_t a = hi(g->af), c = f(g, 4), r = 0;
   unsigned h = 0, ca = 0;
   uint16_t x;
-  if (n < 4) {
+  if (n < 4 || n == 7) {
     if (n < 2) {
       x = a + v + (n == 2 ? c : 0);
       r = (uint8_t)x;

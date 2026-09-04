@@ -74,6 +74,16 @@ UTEST(core, alu_flags_and_daa) {
   gb_destroy(g);
 }
 
+UTEST(core, compare_preserves_accumulator) {
+  gb_t *g = load((const uint8_t[]){0x3e, 0x10, 0xfe, 0x10, 0xfe, 0x20, 0x76}, 7);
+  step(g, 2);
+  ASSERT_EQ(regs(g).af, 0x10c0);
+  ASSERT_EQ(regs(g).pc, 0x104);
+  gb_dbg_step(g);
+  ASSERT_EQ(regs(g).af, 0x1050);
+  gb_destroy(g);
+}
+
 UTEST(core, cb_bit_rotate_set_res) {
   static const uint8_t code[] = {
       0x3e, 0x81, 0xcb, 0x07, 0xcb, 0x47, 0xcb, 0x87, 0xcb, 0xc7, 0x76};
@@ -699,6 +709,7 @@ UTEST(ppu, stat_write_rechecks_coincidence) {
 int main(void) {
   core_immediate_and_register_loads();
   core_alu_flags_and_daa();
+  core_compare_preserves_accumulator();
   core_cb_bit_rotate_set_res();
   core_jumps_call_ret_and_stack();
   core_debugger_pc_breakpoints();
