@@ -335,6 +335,32 @@ UTEST(core, cgb_hblank_dma) {
   gb_destroy(g);
 }
 
+UTEST(core, cgb_speed_switch) {
+  static uint8_t rom[0x8000];
+  memset(rom, 0, sizeof rom);
+  rom[0x143] = 0xc0;
+  rom[0x100] = 0x10;
+  rom[0x101] = 0x00;
+  rom[0x102] = 0x10;
+  rom[0x103] = 0x00;
+  gb_t *g = gb_create();
+  ASSERT_EQ(gb_load_rom(g, rom, sizeof rom), 0);
+  gb_dbg_write(g, 0xff4d, 1);
+  ASSERT_EQ(gb_dbg_read(g, 0xff4d), 0x7f);
+  gb_dbg_step(g);
+  ASSERT_EQ(gb_dbg_read(g, 0xff4d), 0xfe);
+  ASSERT_TRUE(!regs(g).halted);
+  gb_dbg_step(g);
+  ASSERT_TRUE(regs(g).halted);
+  gb_destroy(g);
+
+  g = load((const uint8_t[]){0x10, 0x00}, 2);
+  ASSERT_EQ(gb_dbg_read(g, 0xff4d), 0xff);
+  gb_dbg_step(g);
+  ASSERT_TRUE(regs(g).halted);
+  gb_destroy(g);
+}
+
 UTEST(ppu, cgb_tile_attributes_and_palette) {
   static uint8_t rom[0x8000];
   memset(rom, 0, sizeof rom);
@@ -564,6 +590,7 @@ int main(void) {
   core_cgb_vram_wram_banking_and_state();
   core_cgb_general_dma();
   core_cgb_hblank_dma();
+  core_cgb_speed_switch();
   ppu_cgb_tile_attributes_and_palette();
   ppu_background_tile();
   ppu_lcd_timing_and_interrupts();

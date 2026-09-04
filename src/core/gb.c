@@ -3,7 +3,7 @@
 #include <string.h>
 
 /* Invalid SM83 opcodes are intentionally treated as NOPs in Phase 1. */
-#define STATE_VERSION 6u
+#define STATE_VERSION 7u
 #define STATE_HEADER_SIZE 24u
 struct gb {
   uint8_t *rom, *ram, mem[65536];
@@ -16,7 +16,7 @@ struct gb {
   uint8_t ime, ei_delay, halted, halt_bug, input, div, mbc, battery, ram_bank,
       ram_enable, upper, mode, ppu_mode, stat_signal, dma_page, dma_index,
       dma_active, timer_signal, rtc_select, rtc_latched_valid, rtc[5],
-      rtc_latched[5], vbk, svbk, bg_palette_index, obj_palette_index;
+      rtc_latched[5], vbk, svbk, bg_palette_index, obj_palette_index, key1;
   uint16_t rom_bank;
   uint16_t hdma_source, hdma_dest;
   uint8_t hdma5;
@@ -288,6 +288,8 @@ static uint8_t rd(const gb_t *g, uint16_t a) {
   if (a == 0xff41)
     return (uint8_t)(g->mem[a] | 0x80 | (g->mem[0xff45] == g->mem[0xff44] ? 4 : 0) |
                      g->ppu_mode);
+  if (a == 0xff4d)
+    return g->model == GB_MODEL_CGB ? (uint8_t)(0x7e | g->key1) : 0xff;
   if (a >= 0xa000 && a < 0xc000 && g->mbc == 2)
     return g->ram_enable && a < 0xa200
                ? (uint8_t)(0xf0 | (g->ram[a - 0xa000] & 0x0f))
@@ -427,6 +429,11 @@ static void wr(gb_t *g, uint16_t a, uint8_t v) {
   if (a == 0xff70) {
     g->mem[a] = (uint8_t)(0xf8 | (v & 7));
     g->svbk = v & 7;
+    return;
+  }
+  if (a == 0xff4d) {
+    if (g->model == GB_MODEL_CGB)
+      g->key1 = (uint8_t)((g->key1 & 0x80) | (v & 1));
     return;
   }
   if (a >= 0xff51 && a <= 0xff54) {
@@ -944,7 +951,12 @@ int gb_dbg_step(gb_t *g) {
   }
   case 0x10:
     fc(g);
-    g->halted = 1;
+    if (g->model == GB_MODEL_CGB && (g->key1 & 1)) {
+      g->key1 ^= 0x80;
+      g->key1 &= 0x80;
+    } else {
+      g->halted = 1;
+    }
     break;
   case 0xcd:
     n = fn(g);
@@ -1147,7 +1159,7 @@ int gb_load_ram(gb_t *g, const uint8_t *data, size_t n) {
 }
 size_t gb_save_state_size(const gb_t *g) {
   return g ? STATE_HEADER_SIZE + 0x10000u + sizeof g->vram + sizeof g->wram +
-                      0xa0u + sizeof g->fb + sizeof g->bg_line + 219u + g->ram_size
+                      0xa0u + sizeof g->fb + sizeof g->bg_line + 220u + g->ram_size
            : 0;
 }
 size_t gb_save_state(const gb_t *g, uint8_t *out) {
@@ -1212,6 +1224,7 @@ size_t gb_save_state(const gb_t *g, uint8_t *out) {
   memcpy(p, g->rtc_latched, sizeof g->rtc_latched);
   p += sizeof g->rtc_latched;
   put32(&p, (uint32_t)g->model);
+  *p++ = g->key1;
   put16(&p, g->hdma_source);
   put16(&p, g->hdma_dest);
   *p++ = g->hdma5;
@@ -1288,6 +1301,7 @@ int gb_load_state(gb_t *g, const uint8_t *data, size_t n) {
   memcpy(g->rtc_latched, p, sizeof g->rtc_latched);
   p += sizeof g->rtc_latched;
   g->model = (gb_model_t)get32(&p);
+  g->key1 = *p++;
   g->hdma_source = get16(&p);
   g->hdma_dest = get16(&p);
   g->hdma5 = *p++;
@@ -1327,6 +1341,7 @@ void gb_reset(gb_t *g) {
   g->svbk = 1;
   g->hdma_source = g->hdma_dest = 0;
   g->hdma5 = 0xff;
+  g->key1 = 0;
   g->mem[0xff04] = 0;
   g->mem[0xff05] = 0;
   g->mem[0xff06] = 0;
