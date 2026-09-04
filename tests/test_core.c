@@ -278,6 +278,25 @@ UTEST(core, linked_serial_instances_exchange_bytes) {
   gb_destroy(b);
 }
 
+UTEST(core, linked_serial_master_clocks_external_peer) {
+  gb_t *a = load((const uint8_t[]){0x00}, 1);
+  gb_t *b = load((const uint8_t[]){0x00}, 1);
+  gb_link_serial(a, b);
+  gb_dbg_write(a, 0xff01, 0x56);
+  gb_dbg_write(b, 0xff01, 0x78);
+  gb_dbg_write(a, 0xff02, 0x81);
+  gb_dbg_write(b, 0xff02, 0x80);
+  step(a, 1024);
+  ASSERT_EQ(gb_dbg_read(a, 0xff01), 0x78);
+  ASSERT_EQ(gb_dbg_read(b, 0xff01), 0x56);
+  ASSERT_EQ(gb_dbg_read(a, 0xff0f) & 8, 8);
+  ASSERT_EQ(gb_dbg_read(b, 0xff0f) & 8, 8);
+  ASSERT_EQ(gb_dbg_read(a, 0xff02) & 0x80, 0);
+  ASSERT_EQ(gb_dbg_read(b, 0xff02) & 0x80, 0);
+  gb_destroy(a);
+  gb_destroy(b);
+}
+
 UTEST(core, mbc1_bank_switching) {
   static uint8_t rom[0x10000];
   memset(rom, 0, sizeof rom);
@@ -763,6 +782,7 @@ int main(void) {
   core_timer_overflow_and_reset_state();
   core_joyp_selection_and_serial_callback();
   core_linked_serial_instances_exchange_bytes();
+  core_linked_serial_master_clocks_external_peer();
   core_mbc1_bank_switching();
   core_mbc3_and_mbc5_bank_switching();
   core_mbc2_nibble_ram_and_banking();

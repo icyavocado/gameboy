@@ -617,8 +617,8 @@ static void wr(gb_t *g, uint16_t a, uint8_t v) {
     }
     return;
   }
-  if (a == 0xff02 && (v & 0x81) == 0x81) {
-    g->serial_active = 1;
+  if (a == 0xff02) {
+    g->serial_active = v & 0x80;
     g->serial_cycles = 0;
   }
   g->mem[a] = v;
@@ -864,7 +864,8 @@ static void tick(gb_t *g, unsigned n) {
       if (++g->dma_index == sizeof g->oam)
         g->dma_active = 0;
     }
-    if (g->serial_active && ++g->serial_cycles == 4096) {
+    if (g->serial_active && (g->mem[0xff02] & 1) &&
+        ++g->serial_cycles == 4096) {
       uint8_t in = 0xff;
       if (g->serial_peer && g->serial_peer->serial_active) {
         in = g->serial_peer->mem[0xff01];
