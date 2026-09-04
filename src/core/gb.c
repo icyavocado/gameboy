@@ -278,6 +278,21 @@ static uint8_t jp(const gb_t *g) {
     v &= (uint8_t)~(g->input >> 4);
   return (uint8_t)(0xc0 | s | v);
 }
+static void joypad_irq(gb_t *g, uint8_t old_input, uint8_t new_input) {
+  uint8_t selected = g->mem[0xff00] & 0x30;
+  uint8_t old_lines = 0xf;
+  uint8_t new_lines = 0xf;
+  if (!(selected & 0x10)) {
+    old_lines &= (uint8_t)~old_input;
+    new_lines &= (uint8_t)~new_input;
+  }
+  if (!(selected & 0x20)) {
+    old_lines &= (uint8_t)~(old_input >> 4);
+    new_lines &= (uint8_t)~(new_input >> 4);
+  }
+  if ((old_lines & (uint8_t)~new_lines) != 0)
+    g->mem[0xff0f] |= 0x10;
+}
 static uint8_t rd(const gb_t *g, uint16_t a) {
   if (g->debug_enabled && !g->debug_fetch)
     for (unsigned i = 0; i < MAX_BREAKPOINTS; i++)
@@ -1492,7 +1507,12 @@ void gb_reset(gb_t *g) {
   memset(g->audio_enabled, 0, sizeof g->audio_enabled);
 }
 const uint32_t *gb_framebuffer(const gb_t *g) { return g->fb; }
-void gb_set_input(gb_t *g, uint8_t v) { g->input = v; }
+void gb_set_input(gb_t *g, uint8_t v) {
+  if (!g)
+    return;
+  joypad_irq(g, g->input, v);
+  g->input = v;
+}
 void gb_set_audio_callback(gb_t *g, gb_audio_cb c, void *u) {
   g->audio = c;
   g->audio_user = u;
