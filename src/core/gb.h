@@ -30,6 +30,8 @@ const uint32_t *gb_framebuffer(const gb_t *gb);
 void gb_set_input(gb_t *gb, uint8_t buttons);
 void gb_set_audio_callback(gb_t *gb, gb_audio_cb callback, void *user);
 void gb_set_serial_callback(gb_t *gb, gb_serial_cb callback, void *user);
+void gb_link_serial(gb_t *a, gb_t *b);
+void gb_unlink_serial(gb_t *gb);
 uint8_t gb_dbg_read(const gb_t *gb, uint16_t address);
 void gb_dbg_write(gb_t *gb, uint16_t address, uint8_t value);
 void gb_dbg_regs(const gb_t *gb, gb_regs_t *out);

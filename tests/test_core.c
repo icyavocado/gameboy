@@ -239,6 +239,13 @@ UTEST(core, joyp_selection_and_serial_callback) {
   gb_dbg_write(g, 0xff00, 0x10);
   gb_set_input(g, 1 << 4);
   ASSERT_EQ(gb_dbg_read(g, 0xff0f) & 0x10, 0x10);
+  gb_set_input(g, 0);
+  gb_dbg_write(g, 0xff0f, 0);
+  gb_dbg_write(g, 0xff00, 0x20);
+  gb_set_input(g, 1 << 4);
+  gb_dbg_write(g, 0xff0f, 0);
+  gb_dbg_write(g, 0xff00, 0x10);
+  ASSERT_EQ(gb_dbg_read(g, 0xff0f) & 0x10, 0x10);
   serial_calls = serial_received = 0;
   gb_set_serial_callback(g, serial_callback, NULL);
   gb_dbg_write(g, 0xff01, 'X');
@@ -252,6 +259,23 @@ UTEST(core, joyp_selection_and_serial_callback) {
   ASSERT_EQ(gb_dbg_read(g, 0xff02) & 0x80, 0);
   ASSERT_EQ(gb_dbg_read(g, 0xff0f) & 8, 8);
   gb_destroy(g);
+}
+
+UTEST(core, linked_serial_instances_exchange_bytes) {
+  gb_t *a = load((const uint8_t[]){0x00}, 1);
+  gb_t *b = load((const uint8_t[]){0x00}, 1);
+  gb_link_serial(a, b);
+  gb_dbg_write(a, 0xff01, 0x12);
+  gb_dbg_write(b, 0xff01, 0x34);
+  gb_dbg_write(a, 0xff02, 0x81);
+  gb_dbg_write(b, 0xff02, 0x81);
+  step(a, 1024);
+  ASSERT_EQ(gb_dbg_read(a, 0xff01), 0x34);
+  ASSERT_EQ(gb_dbg_read(b, 0xff01), 0x12);
+  ASSERT_EQ(gb_dbg_read(a, 0xff0f) & 8, 8);
+  ASSERT_EQ(gb_dbg_read(b, 0xff0f) & 8, 8);
+  gb_destroy(a);
+  gb_destroy(b);
 }
 
 UTEST(core, mbc1_bank_switching) {
@@ -738,6 +762,7 @@ int main(void) {
   core_ei_delay_interrupt_and_halt();
   core_timer_overflow_and_reset_state();
   core_joyp_selection_and_serial_callback();
+  core_linked_serial_instances_exchange_bytes();
   core_mbc1_bank_switching();
   core_mbc3_and_mbc5_bank_switching();
   core_mbc2_nibble_ram_and_banking();

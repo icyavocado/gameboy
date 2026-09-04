@@ -32,6 +32,7 @@ struct gb {
   gb_model_t model;
   gb_serial_cb serial;
   void *serial_user;
+  struct gb *serial_peer;
   gb_audio_cb audio;
   void *audio_user;
   gb_bp_t breakpoints[MAX_BREAKPOINTS];
@@ -278,19 +279,18 @@ static uint8_t jp(const gb_t *g) {
     v &= (uint8_t)~(g->input >> 4);
   return (uint8_t)(0xc0 | s | v);
 }
-static void joypad_irq(gb_t *g, uint8_t old_input, uint8_t new_input) {
-  uint8_t selected = g->mem[0xff00] & 0x30;
-  uint8_t old_lines = 0xf;
-  uint8_t new_lines = 0xf;
-  if (!(selected & 0x10)) {
-    old_lines &= (uint8_t)~old_input;
-    new_lines &= (uint8_t)~new_input;
-  }
-  if (!(selected & 0x20)) {
-    old_lines &= (uint8_t)~(old_input >> 4);
-    new_lines &= (uint8_t)~(new_input >> 4);
-  }
-  if ((old_lines & (uint8_t)~new_lines) != 0)
+static uint8_t joypad_lines(uint8_t input, uint8_t selected) {
+  uint8_t lines = 0xf;
+  if (!(selected & 0x10))
+    lines &= (uint8_t)~input;
+  if (!(selected & 0x20))
+    lines &= (uint8_t)~(input >> 4);
+  return lines;
+}
+static void joypad_irq(gb_t *g, uint8_t old_input, uint8_t new_input,
+                       uint8_t old_selected) {
+  if ((joypad_lines(old_input, old_selected) &
+       (uint8_t)~joypad_lines(new_input, g->mem[0xff00] & 0x30)) != 0)
     g->mem[0xff0f] |= 0x10;
 }
 static uint8_t rd(const gb_t *g, uint16_t a) {
@@ -460,7 +460,9 @@ static void wr(gb_t *g, uint16_t a, uint8_t v) {
     return;
   }
   if (a == 0xff00) {
+    uint8_t old_selected = g->mem[a] & 0x30;
     g->mem[a] = (uint8_t)((g->mem[a] & 0xcf) | (v & 0x30));
+    joypad_irq(g, g->input, g->input, old_selected);
     return;
   }
   if (a == 0xff50) {
@@ -864,7 +866,14 @@ static void tick(gb_t *g, unsigned n) {
     }
     if (g->serial_active && ++g->serial_cycles == 4096) {
       uint8_t in = 0xff;
-      if (g->serial)
+      if (g->serial_peer && g->serial_peer->serial_active) {
+        in = g->serial_peer->mem[0xff01];
+        g->serial_peer->mem[0xff01] = g->mem[0xff01];
+        g->serial_peer->mem[0xff02] &= 0x03;
+        g->serial_peer->mem[0xff0f] |= 8;
+        g->serial_peer->serial_active = 0;
+        g->serial_peer->serial_cycles = 0;
+      } else if (g->serial)
         g->serial(g->serial_user, g->mem[0xff01], &in);
       g->mem[0xff01] = in;
       g->mem[0xff02] &= 0x03;
@@ -1226,6 +1235,7 @@ gb_t *gb_create(void) {
 }
 void gb_destroy(gb_t *g) {
   if (g) {
+    gb_unlink_serial(g);
     free(g->rom);
     free(g->ram);
     free(g->boot_rom);
@@ -1510,7 +1520,7 @@ const uint32_t *gb_framebuffer(const gb_t *g) { return g->fb; }
 void gb_set_input(gb_t *g, uint8_t v) {
   if (!g)
     return;
-  joypad_irq(g, g->input, v);
+  joypad_irq(g, g->input, v, g->mem[0xff00] & 0x30);
   g->input = v;
 }
 void gb_set_audio_callback(gb_t *g, gb_audio_cb c, void *u) {
@@ -1520,6 +1530,17 @@ void gb_set_audio_callback(gb_t *g, gb_audio_cb c, void *u) {
 void gb_set_serial_callback(gb_t *g, gb_serial_cb c, void *u) {
   g->serial = c;
   g->serial_user = u;
+}
+void gb_link_serial(gb_t *a, gb_t *b) {
+  if (a) a->serial_peer = b;
+  if (b) b->serial_peer = a;
+}
+void gb_unlink_serial(gb_t *g) {
+  if (g && g->serial_peer) {
+    if (g->serial_peer->serial_peer == g)
+      g->serial_peer->serial_peer = NULL;
+    g->serial_peer = NULL;
+  }
 }
 uint8_t gb_dbg_read(const gb_t *g, uint16_t a) { return rd(g, a); }
 void gb_dbg_write(gb_t *g, uint16_t a, uint8_t v) { wr(g, a, v); }
