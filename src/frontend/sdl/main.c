@@ -101,6 +101,7 @@ int main(int argc, char **argv) {
   SDL_Texture *texture = NULL;
   SDL_AudioDeviceID audio_device = 0;
   int running = 1, paused = debug;
+  unsigned save_timer = 0;
   uint8_t buttons = 0;
 
   if (!path) {
@@ -223,6 +224,10 @@ int main(int argc, char **argv) {
 #endif
     if (!paused)
       gb_run_frame(gb);
+    if (++save_timer == 300) {
+      save_ram(gb, save_path);
+      save_timer = 0;
+    }
     SDL_UpdateTexture(texture, NULL, gb_framebuffer(gb), 160 * 4);
     SDL_SetRenderDrawColor(renderer, 18, 20, 28, 255);
     SDL_RenderClear(renderer);

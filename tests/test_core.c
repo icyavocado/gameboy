@@ -408,6 +408,35 @@ UTEST(core, mbc3_rtc_progression_and_state) {
   gb_destroy(g);
 }
 
+UTEST(core, mbc3_rtc_battery_round_trip) {
+  static uint8_t rom[0x10000];
+  memset(rom, 0, sizeof rom);
+  rom[0x147] = 0x10;
+  rom[0x149] = 3;
+  gb_t *g = gb_create();
+  ASSERT_EQ(gb_load_rom(g, rom, sizeof rom), 0);
+  gb_dbg_write(g, 0x0000, 0x0a);
+  gb_dbg_write(g, 0x4000, 8);
+  gb_dbg_write(g, 0xa000, 12);
+  gb_dbg_write(g, 0x4000, 0x0c);
+  gb_dbg_write(g, 0xa000, 0x80);
+  size_t n = gb_save_ram_size(g);
+  ASSERT_TRUE(n > 0x8000);
+  uint8_t *save = malloc(n);
+  ASSERT_TRUE(save);
+  ASSERT_EQ(gb_save_ram(g, save), n);
+  gb_dbg_write(g, 0x4000, 8);
+  gb_dbg_write(g, 0xa000, 42);
+  ASSERT_EQ(gb_load_ram(g, save, n), 0);
+  gb_dbg_write(g, 0x4000, 8);
+  ASSERT_EQ(gb_dbg_read(g, 0xa000), 12);
+  gb_dbg_write(g, 0x4000, 0x0c);
+  ASSERT_EQ(gb_dbg_read(g, 0xa000), 0x80);
+  ASSERT_EQ(gb_load_ram(g, save, 0x8000), 0);
+  free(save);
+  gb_destroy(g);
+}
+
 UTEST(core, mbc2_nibble_ram_and_banking) {
   static uint8_t rom[0x40000];
   memset(rom, 0, sizeof rom);
@@ -838,6 +867,7 @@ int main(void) {
   core_mbc1_bank_switching();
   core_mbc3_and_mbc5_bank_switching();
   core_mbc3_rtc_progression_and_state();
+  core_mbc3_rtc_battery_round_trip();
   core_mbc2_nibble_ram_and_banking();
   core_wram_echo();
   core_cgb_vram_wram_banking_and_state();

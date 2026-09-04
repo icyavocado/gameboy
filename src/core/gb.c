@@ -7,6 +7,7 @@
 #define STATE_VERSION 8u
 #define STATE_HEADER_SIZE 24u
 #define MAX_BREAKPOINTS 16u
+#define RTC_SAVE_SIZE 24u
 struct gb {
   uint8_t *rom, *ram, *boot_rom, mem[65536];
   uint8_t vram[2][0x2000], wram[8][0x1000], oam[0xa0];
@@ -1305,19 +1306,54 @@ int gb_load_boot_rom(gb_t *g, const uint8_t *rom, size_t n) {
   return 0;
 }
 size_t gb_save_ram_size(const gb_t *g) {
-  return g && g->battery && g->ram ? g->ram_size : 0;
+  if (!g || !g->battery) return 0;
+  return g->ram_size + (g->mbc == 3 ? RTC_SAVE_SIZE : 0);
 }
 size_t gb_save_ram(const gb_t *g, uint8_t *out) {
   size_t n = gb_save_ram_size(g);
-  if (n && out)
-    memcpy(out, g->ram, n);
+  if (n && out) {
+    memcpy(out, g->ram, g->ram_size);
+    if (g->mbc == 3) {
+      uint8_t *p = out + g->ram_size;
+      memcpy(p, "GBRTC01", 8);
+      p += 8;
+      *p++ = g->rtc_select;
+      memcpy(p, g->rtc, sizeof g->rtc);
+      p += sizeof g->rtc;
+      memcpy(p, g->rtc_latched, sizeof g->rtc_latched);
+      p += sizeof g->rtc_latched;
+      *p++ = g->rtc_latched_valid;
+      put32(&p, g->rtc_cycles);
+    }
+  }
   return n;
 }
 int gb_load_ram(gb_t *g, const uint8_t *data, size_t n) {
   size_t expected = gb_save_ram_size(g);
-  if (!data || n != expected)
+  size_t ram_size = g && g->ram ? g->ram_size : 0;
+  if (!g || !data || (n != ram_size && n != expected))
     return -1;
-  memcpy(g->ram, data, n);
+  if (g->mbc == 3 && n == expected) {
+    const uint8_t *p = data + ram_size;
+    uint8_t select;
+    uint8_t rtc[5], latched[5], valid;
+    uint32_t cycles;
+    if (memcmp(p, "GBRTC01", 8) != 0) return -1;
+    p += 8;
+    select = *p++;
+    memcpy(rtc, p, sizeof rtc);
+    p += sizeof rtc;
+    memcpy(latched, p, sizeof latched);
+    p += sizeof latched;
+    valid = *p++;
+    cycles = get32(&p);
+    memcpy(g->rtc, rtc, sizeof g->rtc);
+    memcpy(g->rtc_latched, latched, sizeof g->rtc_latched);
+    g->rtc_select = select;
+    g->rtc_latched_valid = valid;
+    g->rtc_cycles = cycles;
+  }
+  if (ram_size) memcpy(g->ram, data, ram_size);
   return 0;
 }
 size_t gb_save_state_size(const gb_t *g) {
