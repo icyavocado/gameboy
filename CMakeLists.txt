@@ -13,6 +13,10 @@ add_executable(gb-headless src/frontend/headless/main.c)
 target_link_libraries(gb-headless PRIVATE gb)
 target_compile_options(gb-headless PRIVATE -Wall -Wextra -Werror)
 
+add_executable(gb-link src/frontend/link/main.c)
+target_link_libraries(gb-link PRIVATE gb)
+target_compile_options(gb-link PRIVATE -Wall -Wextra -Werror)
+
 find_package(PkgConfig REQUIRED)
 pkg_check_modules(SDL2 REQUIRED sdl2)
 add_executable(gb-sdl src/frontend/sdl/main.c src/frontend/sdl/input.c)
