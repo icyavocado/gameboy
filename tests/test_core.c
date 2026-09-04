@@ -108,8 +108,8 @@ UTEST(core, debugger_pc_breakpoints) {
   gb_dbg_enable(g, true);
   ASSERT_EQ(gb_dbg_run_until_break(g), id);
   ASSERT_EQ(regs(g).pc, 0x101);
-  ASSERT_EQ(gb_dbg_step(g), 4);
   ASSERT_EQ(gb_dbg_run_until_break(g), -1);
+  ASSERT_EQ(regs(g).pc, 0x103);
   gb_dbg_del_bp(g, id);
   gb_destroy(g);
 }

@@ -55,6 +55,20 @@ static void audio(void *user, const int16_t *stereo, size_t frames) {
   SDL_QueueAudio(device, stereo, (uint32_t)(frames * 2 * sizeof *stereo));
 }
 
+static uint8_t key_button(SDL_Keycode key) {
+  switch (key) {
+  case SDLK_RIGHT: return 1 << 0;
+  case SDLK_LEFT: return 1 << 1;
+  case SDLK_UP: return 1 << 2;
+  case SDLK_DOWN: return 1 << 3;
+  case SDLK_z: return 1 << 4;
+  case SDLK_x: return 1 << 5;
+  case SDLK_RSHIFT: return 1 << 6;
+  case SDLK_RETURN: return 1 << 7;
+  default: return 0;
+  }
+}
+
 int main(int argc, char **argv) {
   int debug = argc == 3 && strcmp(argv[1], "--debug") == 0;
   const char *path = debug ? argv[2] : argc == 2 ? argv[1] : NULL;
@@ -67,6 +81,7 @@ int main(int argc, char **argv) {
   SDL_Texture *texture = NULL;
   SDL_AudioDeviceID audio_device = 0;
   int running = 1, paused = debug;
+  uint8_t buttons = 0;
 
   if (!path) {
     fprintf(stderr, "usage: %s [--debug] ROM\n", argv[0]);
@@ -146,6 +161,16 @@ int main(int argc, char **argv) {
     while (SDL_PollEvent(&event)) {
       if (event.type == SDL_QUIT)
         running = 0;
+      if (event.type == SDL_KEYDOWN || event.type == SDL_KEYUP) {
+        uint8_t button = key_button(event.key.keysym.sym);
+        if (button) {
+          if (event.type == SDL_KEYDOWN)
+            buttons |= button;
+          else
+            buttons &= (uint8_t)~button;
+          gb_set_input(gb, buttons);
+        }
+      }
       if (event.type == SDL_KEYDOWN && event.key.keysym.sym == SDLK_F5)
         save_state(gb, state_path, state, state_size);
       if (event.type == SDL_KEYDOWN && event.key.keysym.sym == SDLK_F8) {

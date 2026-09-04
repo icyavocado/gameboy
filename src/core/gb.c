@@ -35,7 +35,8 @@ struct gb {
   gb_audio_cb audio;
   void *audio_user;
   gb_bp_t breakpoints[MAX_BREAKPOINTS];
-  uint8_t breakpoint_used[MAX_BREAKPOINTS], debug_enabled, watch_hit, debug_fetch;
+  uint8_t breakpoint_used[MAX_BREAKPOINTS], debug_enabled, watch_hit, debug_fetch,
+      debug_pc_hit;
 };
 static uint8_t lo(uint16_t x) { return (uint8_t)x; }
 static uint8_t hi(uint16_t x) { return (uint8_t)(x >> 8); }
@@ -877,6 +878,7 @@ static int irq(gb_t *g) {
   return 20;
 }
 int gb_dbg_step(gb_t *g) {
+  g->debug_pc_hit = 0;
   int q = irq(g);
   if (q) {
     tick(g, q);
@@ -1161,11 +1163,15 @@ int gb_dbg_run_until_break(gb_t *g) {
   unsigned cycles = 0;
   g->watch_hit = 0;
   while (cycles < 70224) {
-    if (g->debug_enabled)
+    if (g->debug_enabled && g->debug_pc_hit) {
+      g->debug_pc_hit = 0;
+    } else if (g->debug_enabled)
       for (unsigned i = 0; i < MAX_BREAKPOINTS; i++)
         if (g->breakpoint_used[i] && g->breakpoints[i].kind == GB_BP_PC &&
-            g->breakpoints[i].addr == g->pc)
+            g->breakpoints[i].addr == g->pc) {
+          g->debug_pc_hit = 1;
           return (int)i;
+        }
     cycles += (unsigned)gb_dbg_step(g);
     if (g->watch_hit)
       return g->watch_hit - 1;
