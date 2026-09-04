@@ -3,6 +3,8 @@
 #include <string.h>
 
 /* Invalid SM83 opcodes are intentionally treated as NOPs in Phase 1. */
+#define STATE_VERSION 1u
+#define STATE_HEADER_SIZE 24u
 struct gb {
   uint8_t *rom, *ram, mem[65536];
   uint8_t vram[0x2000], oam[0xa0];
@@ -10,8 +12,8 @@ struct gb {
   uint32_t fb[160 * 144];
   uint8_t bg_line[160];
   uint16_t af, bc, de, hl, sp, pc, timer;
-  uint8_t ime, ei_delay, halted, halt_bug, input, div, mbc, rom_bank, ram_bank,
-      ram_enable, upper, mode, ppu_mode, stat_signal;
+  uint8_t ime, ei_delay, halted, halt_bug, input, div, mbc, battery, rom_bank,
+      ram_bank, ram_enable, upper, mode, ppu_mode, stat_signal;
   unsigned ppu_cycles;
   gb_model_t model;
   gb_serial_cb serial;
@@ -84,6 +86,28 @@ static uint16_t pop(gb_t *g) {
 static size_t ramsize(uint8_t c) {
   static const size_t n[] = {0, 0x800, 0x2000, 0x8000, 0x20000, 0x10000};
   return c < 6 ? n[c] : 0;
+}
+static int has_battery(uint8_t type) {
+  return type == 3 || type == 9 || (type >= 0x0f && type <= 0x13) ||
+         (type >= 0x1b && type <= 0x1e);
+}
+static void put16(uint8_t **p, uint16_t v) {
+  (*p)[0] = (uint8_t)v;
+  (*p)[1] = (uint8_t)(v >> 8);
+  *p += 2;
+}
+static void put32(uint8_t **p, uint32_t v) {
+  put16(p, (uint16_t)v);
+  put16(p, (uint16_t)(v >> 16));
+}
+static uint16_t get16(const uint8_t **p) {
+  uint16_t v = (uint16_t)((*p)[0] | (*p)[1] << 8);
+  *p += 2;
+  return v;
+}
+static uint32_t get32(const uint8_t **p) {
+  uint32_t v = get16(p);
+  return v | (uint32_t)get16(p) << 16;
 }
 static size_t rb(const gb_t *g, uint16_t a) {
   size_t banks = g->rom_size / 0x4000;
@@ -636,11 +660,127 @@ int gb_load_rom(gb_t *g, const uint8_t *r, size_t n) {
   memcpy(g->rom, r, n);
   g->rom_size = n;
   g->mbc = r[0x147] >= 1 && r[0x147] <= 3;
+  g->battery = (uint8_t)has_battery(r[0x147]);
   g->ram_size = ramsize(r[0x149]);
   g->ram = g->ram_size ? calloc(1, g->ram_size) : NULL;
   if (g->ram_size && !g->ram)
     return -1;
   gb_reset(g);
+  return 0;
+}
+size_t gb_save_ram_size(const gb_t *g) {
+  return g && g->battery && g->ram ? g->ram_size : 0;
+}
+size_t gb_save_ram(const gb_t *g, uint8_t *out) {
+  size_t n = gb_save_ram_size(g);
+  if (n && out)
+    memcpy(out, g->ram, n);
+  return n;
+}
+int gb_load_ram(gb_t *g, const uint8_t *data, size_t n) {
+  size_t expected = gb_save_ram_size(g);
+  if (!data || n != expected)
+    return -1;
+  memcpy(g->ram, data, n);
+  return 0;
+}
+size_t gb_save_state_size(const gb_t *g) {
+  return g ? STATE_HEADER_SIZE + 0x10000u + 0x2000u + 0xa0u +
+                   sizeof g->fb + sizeof g->bg_line + 37u + g->ram_size
+           : 0;
+}
+size_t gb_save_state(const gb_t *g, uint8_t *out) {
+  if (!g || !out)
+    return 0;
+  uint8_t *p = out;
+  memcpy(p, "GBSTATE1", 8);
+  p += 8;
+  put32(&p, STATE_VERSION);
+  put32(&p, (uint32_t)g->rom_size);
+  put32(&p, (uint32_t)g->ram_size);
+  put32(&p, (uint32_t)(gb_save_state_size(g) - STATE_HEADER_SIZE));
+  memcpy(p, g->mem, sizeof g->mem);
+  p += sizeof g->mem;
+  memcpy(p, g->vram, sizeof g->vram);
+  p += sizeof g->vram;
+  memcpy(p, g->oam, sizeof g->oam);
+  p += sizeof g->oam;
+  memcpy(p, g->fb, sizeof g->fb);
+  p += sizeof g->fb;
+  memcpy(p, g->bg_line, sizeof g->bg_line);
+  p += sizeof g->bg_line;
+  put16(&p, g->af);
+  put16(&p, g->bc);
+  put16(&p, g->de);
+  put16(&p, g->hl);
+  put16(&p, g->sp);
+  put16(&p, g->pc);
+  *p++ = g->ime;
+  *p++ = g->ei_delay;
+  *p++ = g->halted;
+  *p++ = g->halt_bug;
+  *p++ = g->input;
+  *p++ = g->div;
+  *p++ = g->mbc;
+  *p++ = g->battery;
+  *p++ = g->rom_bank;
+  *p++ = g->ram_bank;
+  *p++ = g->ram_enable;
+  *p++ = g->upper;
+  *p++ = g->mode;
+  *p++ = g->ppu_mode;
+  *p++ = g->stat_signal;
+  put16(&p, g->timer);
+  put32(&p, g->ppu_cycles);
+  put32(&p, (uint32_t)g->model);
+  if (g->ram_size)
+    memcpy(p, g->ram, g->ram_size);
+  return gb_save_state_size(g);
+}
+int gb_load_state(gb_t *g, const uint8_t *data, size_t n) {
+  if (!g || !data || n != gb_save_state_size(g) || n < STATE_HEADER_SIZE ||
+      memcmp(data, "GBSTATE1", 8) != 0)
+    return -1;
+  const uint8_t *p = data + 8;
+  if (get32(&p) != STATE_VERSION || get32(&p) != g->rom_size ||
+      get32(&p) != g->ram_size || get32(&p) != n - STATE_HEADER_SIZE)
+    return -1;
+  memcpy(g->mem, p, sizeof g->mem);
+  p += sizeof g->mem;
+  memcpy(g->vram, p, sizeof g->vram);
+  p += sizeof g->vram;
+  memcpy(g->oam, p, sizeof g->oam);
+  p += sizeof g->oam;
+  memcpy(g->fb, p, sizeof g->fb);
+  p += sizeof g->fb;
+  memcpy(g->bg_line, p, sizeof g->bg_line);
+  p += sizeof g->bg_line;
+  g->af = get16(&p);
+  g->bc = get16(&p);
+  g->de = get16(&p);
+  g->hl = get16(&p);
+  g->sp = get16(&p);
+  g->pc = get16(&p);
+  g->ime = *p++;
+  g->ei_delay = *p++;
+  g->halted = *p++;
+  g->halt_bug = *p++;
+  g->input = *p++;
+  g->div = *p++;
+  g->mbc = *p++;
+  g->battery = *p++;
+  g->rom_bank = *p++;
+  g->ram_bank = *p++;
+  g->ram_enable = *p++;
+  g->upper = *p++;
+  g->mode = *p++;
+  g->ppu_mode = *p++;
+  g->stat_signal = *p++;
+  g->timer = get16(&p);
+  g->ppu_cycles = get32(&p);
+  g->model = (gb_model_t)get32(&p);
+  if (g->ram_size)
+    memcpy(g->ram, p, g->ram_size);
   return 0;
 }
 void gb_set_model(gb_t *g, gb_model_t m) { g->model = m; }

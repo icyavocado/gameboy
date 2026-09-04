@@ -1,5 +1,6 @@
 #include "gb.h"
 #include "utest.h"
+#include <stdlib.h>
 #include <stdint.h>
 #include <string.h>
 
@@ -217,6 +218,41 @@ UTEST(ppu, sprite_rendering) {
   gb_destroy(g);
 }
 
+UTEST(core, battery_ram_round_trip) {
+  static uint8_t rom[0x8000];
+  uint8_t save[0x2000];
+  memset(rom, 0, sizeof rom);
+  rom[0x147] = 3;
+  rom[0x149] = 2;
+  gb_t *g = gb_create();
+  ASSERT_EQ(gb_load_rom(g, rom, sizeof rom), 0);
+  ASSERT_EQ(gb_save_ram_size(g), 0x2000);
+  gb_dbg_write(g, 0x0000, 0x0a);
+  gb_dbg_write(g, 0xa123, 0x5a);
+  ASSERT_EQ(gb_save_ram(g, save), sizeof save);
+  gb_dbg_write(g, 0xa123, 0xa5);
+  ASSERT_EQ(gb_load_ram(g, save, sizeof save), 0);
+  ASSERT_EQ(gb_dbg_read(g, 0xa123), 0x5a);
+  gb_destroy(g);
+}
+
+UTEST(core, save_state_round_trip) {
+  gb_t *g = load((const uint8_t[]){0x06, 0x42, 0x76}, 3);
+  gb_dbg_write(g, 0x8000, 0x9a);
+  gb_dbg_step(g);
+  size_t n = gb_save_state_size(g);
+  uint8_t *state = malloc(n);
+  ASSERT_TRUE(state);
+  ASSERT_EQ(gb_save_state(g, state), n);
+  gb_dbg_write(g, 0x8000, 0x12);
+  gb_dbg_step(g);
+  ASSERT_EQ(gb_load_state(g, state, n), 0);
+  ASSERT_EQ(gb_dbg_read(g, 0x8000), 0x9a);
+  ASSERT_EQ(regs(g).bc >> 8, 0x42);
+  free(state);
+  gb_destroy(g);
+}
+
 int main(void) {
   core_immediate_and_register_loads();
   core_alu_flags_and_daa();
@@ -230,6 +266,8 @@ int main(void) {
   ppu_background_tile();
   ppu_lcd_timing_and_interrupts();
   ppu_sprite_rendering();
-  puts("12 tests passed");
+  core_battery_ram_round_trip();
+  core_save_state_round_trip();
+  puts("14 tests passed");
   return 0;
 }
