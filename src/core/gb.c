@@ -7,7 +7,7 @@
 #define STATE_HEADER_SIZE 24u
 struct gb {
   uint8_t *rom, *ram, mem[65536];
-  uint8_t vram[0x2000], oam[0xa0];
+  uint8_t vram[2][0x2000], wram[8][0x1000], oam[0xa0];
   size_t rom_size, ram_size;
   uint32_t fb[160 * 144];
   uint8_t bg_line[160];
@@ -15,7 +15,7 @@ struct gb {
   uint8_t ime, ei_delay, halted, halt_bug, input, div, mbc, battery, ram_bank,
       ram_enable, upper, mode, ppu_mode, stat_signal, dma_page, dma_index,
       dma_active, timer_signal, rtc_select, rtc_latched_valid, rtc[5],
-      rtc_latched[5];
+      rtc_latched[5], vbk, svbk;
   uint16_t rom_bank;
   unsigned ppu_cycles;
   unsigned dma_cycles;
@@ -43,6 +43,10 @@ static void ppu_tick(gb_t *);
 static void ppu_stat(gb_t *);
 static void audio_trigger(gb_t *, unsigned);
 static void audio_frame(gb_t *);
+static unsigned vram_bank(const gb_t *g) { return g->model == GB_MODEL_CGB ? g->vbk & 1 : 0; }
+static unsigned wram_bank(const gb_t *g) {
+  return g->model == GB_MODEL_CGB ? (g->svbk & 7 ? g->svbk & 7 : 1) : 1;
+}
 static uint8_t audio_read(const gb_t *g, uint16_t a) {
   if (a == 0xff26)
     return (uint8_t)(g->mem[a] | 0x70 | (g->audio_enabled[0] ? 1 : 0) |
@@ -251,8 +255,13 @@ static uint8_t rd(const gb_t *g, uint16_t a) {
     return g->rom[rb(g, a)];
   if (a >= 0xe000 && a < 0xfe00)
     a = (uint16_t)(a - 0x2000);
+  if (a >= 0xc000 && a < 0xd000)
+    return g->model == GB_MODEL_CGB ? g->wram[0][a - 0xc000] : g->mem[a];
+  if (a >= 0xd000 && a < 0xe000)
+    return g->model == GB_MODEL_CGB ? g->wram[wram_bank(g)][a - 0xd000]
+                                    : g->mem[a];
   if (a >= 0x8000 && a < 0xa000)
-    return g->vram[a - 0x8000];
+    return g->vram[vram_bank(g)][a - 0x8000];
   if (a >= 0xfe00 && a < 0xff00)
     return a < 0xfea0 ? g->oam[a - 0xfe00] : 0xff;
   if (a == 0xff44)
@@ -278,8 +287,22 @@ static uint8_t rd(const gb_t *g, uint16_t a) {
 static void wr(gb_t *g, uint16_t a, uint8_t v) {
   if (a >= 0xe000 && a < 0xfe00)
     a = (uint16_t)(a - 0x2000);
+  if (a >= 0xc000 && a < 0xd000) {
+    if (g->model == GB_MODEL_CGB)
+      g->wram[0][a - 0xc000] = v;
+    else
+      g->mem[a] = v;
+    return;
+  }
+  if (a >= 0xd000 && a < 0xe000) {
+    if (g->model == GB_MODEL_CGB)
+      g->wram[wram_bank(g)][a - 0xd000] = v;
+    else
+      g->mem[a] = v;
+    return;
+  }
   if (a >= 0x8000 && a < 0xa000) {
-    g->vram[a - 0x8000] = v;
+    g->vram[vram_bank(g)][a - 0x8000] = v;
     return;
   }
   if (a >= 0xfe00 && a < 0xff00) {
@@ -366,6 +389,16 @@ static void wr(gb_t *g, uint16_t a, uint8_t v) {
   }
   if (a == 0xff00) {
     g->mem[a] = (uint8_t)((g->mem[a] & 0xcf) | (v & 0x30));
+    return;
+  }
+  if (a == 0xff4f) {
+    g->mem[a] = (uint8_t)(0xfe | (v & 1));
+    g->vbk = v & 1;
+    return;
+  }
+  if (a == 0xff70) {
+    g->mem[a] = (uint8_t)(0xf8 | (v & 7));
+    g->svbk = v & 7;
     return;
   }
   if (a == 0xff26) {
@@ -564,7 +597,7 @@ static int cb(gb_t *g, uint8_t o) {
 }
 static uint8_t tile_pixel(const gb_t *g, int tile, unsigned row, unsigned col) {
   size_t a = (size_t)((tile & 255) * 16 + row * 2);
-  uint8_t lo = g->vram[a & 0x1fff], hi = g->vram[(a + 1) & 0x1fff];
+  uint8_t lo = g->vram[0][a & 0x1fff], hi = g->vram[0][(a + 1) & 0x1fff];
   return (uint8_t)(((hi >> (7 - col)) & 1) * 2 + ((lo >> (7 - col)) & 1));
 }
 static void ppu_line(gb_t *g, unsigned y) {
@@ -581,7 +614,7 @@ static void ppu_line(gb_t *g, unsigned y) {
     unsigned map = window ? ((lcdc & 0x40) ? 0x1c00 : 0x1800)
                           : ((lcdc & 8) ? 0x1c00 : 0x1800);
     unsigned tx = (px >> 3) & 31, ty = (py >> 3) & 31;
-    uint8_t t = g->vram[map + ty * 32 + tx], pal = g->mem[0xff47];
+    uint8_t t = g->vram[0][map + ty * 32 + tx], pal = g->mem[0xff47];
     int tile = (lcdc & 0x10) ? t : (int8_t)t + 256;
     uint8_t p = (lcdc & 1) ? tile_pixel(g, tile, py & 7, px & 7) : 0;
     g->bg_line[x] = p;
@@ -988,6 +1021,8 @@ int gb_load_rom(gb_t *g, const uint8_t *r, size_t n) {
     return -1;
   memcpy(g->rom, r, n);
   g->rom_size = n;
+  if (g->model == GB_MODEL_AUTO)
+    g->model = (r[0x143] & 0x80) ? GB_MODEL_CGB : GB_MODEL_DMG;
   g->mbc = r[0x147] == 5 || r[0x147] == 6
                ? 2
                : r[0x147] == 1 || r[0x147] == 2 || r[0x147] == 3
@@ -1020,8 +1055,8 @@ int gb_load_ram(gb_t *g, const uint8_t *data, size_t n) {
   return 0;
 }
 size_t gb_save_state_size(const gb_t *g) {
-  return g ? STATE_HEADER_SIZE + 0x10000u + 0x2000u + 0xa0u +
-                    sizeof g->fb + sizeof g->bg_line + 82u + g->ram_size
+  return g ? STATE_HEADER_SIZE + 0x10000u + sizeof g->vram + sizeof g->wram +
+                     0xa0u + sizeof g->fb + sizeof g->bg_line + 84u + g->ram_size
            : 0;
 }
 size_t gb_save_state(const gb_t *g, uint8_t *out) {
@@ -1038,6 +1073,8 @@ size_t gb_save_state(const gb_t *g, uint8_t *out) {
   p += sizeof g->mem;
   memcpy(p, g->vram, sizeof g->vram);
   p += sizeof g->vram;
+  memcpy(p, g->wram, sizeof g->wram);
+  p += sizeof g->wram;
   memcpy(p, g->oam, sizeof g->oam);
   p += sizeof g->oam;
   memcpy(p, g->fb, sizeof g->fb);
@@ -1080,6 +1117,8 @@ size_t gb_save_state(const gb_t *g, uint8_t *out) {
   memcpy(p, g->rtc_latched, sizeof g->rtc_latched);
   p += sizeof g->rtc_latched;
   put32(&p, (uint32_t)g->model);
+  *p++ = g->vbk;
+  *p++ = g->svbk;
   put16(&p, g->noise_lfsr);
   for (unsigned i = 0; i < 4; i++) {
     put32(&p, g->audio_phase[i]);
@@ -1101,6 +1140,8 @@ int gb_load_state(gb_t *g, const uint8_t *data, size_t n) {
   p += sizeof g->mem;
   memcpy(g->vram, p, sizeof g->vram);
   p += sizeof g->vram;
+  memcpy(g->wram, p, sizeof g->wram);
+  p += sizeof g->wram;
   memcpy(g->oam, p, sizeof g->oam);
   p += sizeof g->oam;
   memcpy(g->fb, p, sizeof g->fb);
@@ -1121,7 +1162,7 @@ int gb_load_state(gb_t *g, const uint8_t *data, size_t n) {
   g->div = *p++;
   g->mbc = *p++;
   g->battery = *p++;
-  g->rom_bank = *p++;
+  g->rom_bank = get16(&p);
   g->ram_bank = *p++;
   g->ram_enable = *p++;
   g->upper = *p++;
@@ -1143,6 +1184,8 @@ int gb_load_state(gb_t *g, const uint8_t *data, size_t n) {
   memcpy(g->rtc_latched, p, sizeof g->rtc_latched);
   p += sizeof g->rtc_latched;
   g->model = (gb_model_t)get32(&p);
+  g->vbk = *p++;
+  g->svbk = *p++;
   g->noise_lfsr = get16(&p);
   for (unsigned i = 0; i < 4; i++) {
     g->audio_phase[i] = get32(&p);
@@ -1171,6 +1214,8 @@ void gb_reset(gb_t *g) {
   g->stat_signal = 0;
   g->dma_page = g->dma_index = g->dma_active = 0;
   g->dma_cycles = 0;
+  g->vbk = 0;
+  g->svbk = 1;
   g->mem[0xff04] = 0;
   g->mem[0xff05] = 0;
   g->mem[0xff06] = 0;
@@ -1179,6 +1224,8 @@ void gb_reset(gb_t *g) {
   g->mem[0xffff] = 0;
   g->mem[0xff40] = 0x91;
   g->mem[0xff47] = 0xe4;
+  g->mem[0xff4f] = 0xfe;
+  g->mem[0xff70] = 0xf9;
   g->mem[0xff00] = 0xcf;
   g->mem[0xff44] = 0;
   memset(g->mem + 0xff10, 0, 0x17);
