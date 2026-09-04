@@ -11,10 +11,10 @@ struct gb {
   size_t rom_size, ram_size;
   uint32_t fb[160 * 144];
   uint8_t bg_line[160];
-  uint16_t af, bc, de, hl, sp, pc, timer;
+  uint16_t af, bc, de, hl, sp, pc, timer, divider;
   uint8_t ime, ei_delay, halted, halt_bug, input, div, mbc, battery, rom_bank,
       ram_bank, ram_enable, upper, mode, ppu_mode, stat_signal, dma_page,
-      dma_index, dma_active;
+      dma_index, dma_active, timer_signal;
   unsigned ppu_cycles;
   unsigned dma_cycles;
   gb_model_t model;
@@ -35,6 +35,14 @@ static void fs(gb_t *g, unsigned z, unsigned n, unsigned h, unsigned c) {
 static uint8_t rd(const gb_t *, uint16_t);
 static void wr(gb_t *, uint16_t, uint8_t);
 static void ppu_tick(gb_t *);
+static void ppu_stat(gb_t *);
+static unsigned timer_bit(const gb_t *g) {
+  static const unsigned bits[] = {9, 3, 5, 7};
+  return bits[g->mem[0xff07] & 3];
+}
+static unsigned timer_level(const gb_t *g) {
+  return (g->mem[0xff07] & 4) && ((g->divider >> timer_bit(g)) & 1);
+}
 static uint8_t *rp8(gb_t *g, unsigned n) {
   switch (n) {
   case 0:
@@ -218,13 +226,23 @@ static void wr(gb_t *g, uint16_t a, uint8_t v) {
     return;
   }
   if (a == 0xff04) {
+    unsigned old_signal = g->timer_signal;
     g->mem[a] = 0;
+    g->divider = 0;
     g->div = 0;
     g->timer = 0;
+    g->timer_signal = 0;
+    if (old_signal && !timer_level(g)) {
+      if (++g->mem[0xff05] == 0) {
+        g->mem[0xff05] = g->mem[0xff06];
+        g->mem[0xff0f] |= 4;
+      }
+    }
     return;
   }
   if (a == 0xff41) {
     g->mem[a] = (uint8_t)((g->mem[a] & 7) | (v & 0x78));
+    ppu_stat(g);
     return;
   }
   if (a == 0xff44)
@@ -248,6 +266,24 @@ static void wr(gb_t *g, uint16_t a, uint8_t v) {
       g->ppu_mode = 2;
       g->ppu_cycles = 0;
       g->mem[0xff44] = 0;
+    }
+    return;
+  }
+  if (a == 0xff45) {
+    g->mem[a] = v;
+    ppu_stat(g);
+    return;
+  }
+  if (a == 0xff07) {
+    unsigned old_signal = g->timer_signal;
+    g->mem[a] = (uint8_t)(v & 7);
+    unsigned new_signal = timer_level(g);
+    g->timer_signal = (uint8_t)new_signal;
+    if (old_signal && !new_signal) {
+      if (++g->mem[0xff05] == 0) {
+        g->mem[0xff05] = g->mem[0xff06];
+        g->mem[0xff0f] |= 4;
+      }
     }
     return;
   }
@@ -445,16 +481,16 @@ static void ppu_tick(gb_t *g) {
 }
 static void tick(gb_t *g, unsigned n) {
   while (n--) {
-    if (++g->div == 0)
-      g->mem[0xff04]++;
-    if (g->mem[0xff07] & 4) {
-      static const uint16_t rate[] = {1024, 16, 64, 256};
-      if (++g->timer >= rate[g->mem[0xff07] & 3]) {
-        g->timer = 0;
-        if (++g->mem[0xff05] == 0) {
-          g->mem[0xff05] = g->mem[0xff06];
-          g->mem[0xff0f] |= 4;
-        }
+    unsigned old = timer_level(g);
+    g->divider++;
+    g->div = (uint8_t)(g->divider >> 8);
+    g->mem[0xff04] = g->div;
+    unsigned now = timer_level(g);
+    g->timer_signal = (uint8_t)now;
+    if (old && !now) {
+      if (++g->mem[0xff05] == 0) {
+        g->mem[0xff05] = g->mem[0xff06];
+        g->mem[0xff0f] |= 4;
       }
     }
     ppu_tick(g);
@@ -816,7 +852,7 @@ int gb_load_ram(gb_t *g, const uint8_t *data, size_t n) {
 }
 size_t gb_save_state_size(const gb_t *g) {
   return g ? STATE_HEADER_SIZE + 0x10000u + 0x2000u + 0xa0u +
-                   sizeof g->fb + sizeof g->bg_line + 44u + g->ram_size
+                   sizeof g->fb + sizeof g->bg_line + 47u + g->ram_size
            : 0;
 }
 size_t gb_save_state(const gb_t *g, uint8_t *out) {
@@ -866,6 +902,8 @@ size_t gb_save_state(const gb_t *g, uint8_t *out) {
   put16(&p, g->timer);
   put32(&p, g->ppu_cycles);
   put32(&p, g->dma_cycles);
+  put16(&p, g->divider);
+  *p++ = g->timer_signal;
   put32(&p, (uint32_t)g->model);
   if (g->ram_size)
     memcpy(p, g->ram, g->ram_size);
@@ -916,6 +954,8 @@ int gb_load_state(gb_t *g, const uint8_t *data, size_t n) {
   g->timer = get16(&p);
   g->ppu_cycles = get32(&p);
   g->dma_cycles = get32(&p);
+  g->divider = get16(&p);
+  g->timer_signal = *p++;
   g->model = (gb_model_t)get32(&p);
   if (g->ram_size)
     memcpy(g->ram, p, g->ram_size);
@@ -932,7 +972,9 @@ void gb_reset(gb_t *g) {
   g->ime = g->halted = g->halt_bug = g->ei_delay = 0;
   g->rom_bank = 1;
   g->ram_bank = g->upper = g->mode = 0;
-  g->div = g->timer = 0;
+  g->div = 0;
+  g->divider = g->timer = 0;
+  g->timer_signal = 0;
   g->ppu_cycles = 0;
   g->ppu_mode = 2;
   g->stat_signal = 0;

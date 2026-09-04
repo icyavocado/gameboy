@@ -294,6 +294,27 @@ UTEST(core, oam_dma_transfer) {
   gb_destroy(g);
 }
 
+UTEST(core, timer_uses_divider_edges) {
+  gb_t *g = load((const uint8_t[]){0x00}, 1);
+  gb_dbg_write(g, 0xff05, 0);
+  gb_dbg_write(g, 0xff07, 0x05);
+  for (unsigned i = 0; i < 16; i++)
+    gb_dbg_step(g);
+  ASSERT_EQ(gb_dbg_read(g, 0xff05), 4);
+  gb_dbg_write(g, 0xff04, 0);
+  ASSERT_EQ(gb_dbg_read(g, 0xff04), 0);
+  gb_destroy(g);
+}
+
+UTEST(ppu, stat_write_rechecks_coincidence) {
+  gb_t *g = load((const uint8_t[]){0x00}, 1);
+  gb_dbg_write(g, 0xff45, 0);
+  gb_dbg_write(g, 0xff0f, 0);
+  gb_dbg_write(g, 0xff41, 0x40);
+  ASSERT_TRUE(gb_dbg_read(g, 0xff0f) & 2);
+  gb_destroy(g);
+}
+
 int main(void) {
   core_immediate_and_register_loads();
   core_alu_flags_and_daa();
@@ -312,6 +333,8 @@ int main(void) {
   core_extended_control_and_stack_opcodes();
   core_conditional_relative_and_signed_stack_arithmetic();
   core_oam_dma_transfer();
-  puts("17 tests passed");
+  core_timer_uses_divider_edges();
+  ppu_stat_write_rechecks_coincidence();
+  puts("19 tests passed");
   return 0;
 }
