@@ -1,5 +1,6 @@
 #include "gb.h"
 #include "input.h"
+#include "ui_assets.h"
 #include <SDL.h>
 #include <dirent.h>
 #include <stdint.h>
@@ -11,6 +12,8 @@
 #ifdef GB_ENABLE_TUI
 #include <ncurses.h>
 #endif
+
+static gb_ui_assets_t ui_assets;
 
 static int write_file(const char *path, const uint8_t *data, size_t size) {
   FILE *file = fopen(path, "wb");
@@ -103,28 +106,6 @@ static void audio(void *user, const int16_t *stereo, size_t frames) {
   free(scaled);
 }
 
-static const uint8_t font[128][7] = {
-    ['A'] = {14, 17, 17, 31, 17, 17, 17}, ['B'] = {30, 17, 17, 30, 17, 17, 30},
-    ['C'] = {14, 17, 16, 16, 16, 17, 14}, ['D'] = {30, 17, 17, 17, 17, 17, 30},
-    ['E'] = {31, 16, 16, 30, 16, 16, 31}, ['F'] = {31, 16, 16, 30, 16, 16, 16},
-    ['G'] = {14, 17, 16, 23, 17, 17, 14}, ['H'] = {17, 17, 17, 31, 17, 17, 17},
-    ['I'] = {31, 4, 4, 4, 4, 4, 31}, ['K'] = {17, 18, 20, 24, 20, 18, 17},
-    ['L'] = {16, 16, 16, 16, 16, 16, 31},
-    ['M'] = {17, 27, 21, 21, 17, 17, 17}, ['N'] = {17, 25, 21, 19, 17, 17, 17},
-    ['O'] = {14, 17, 17, 17, 17, 17, 14}, ['P'] = {30, 17, 17, 30, 16, 16, 16},
-    ['R'] = {30, 17, 17, 30, 20, 18, 17}, ['S'] = {15, 16, 16, 14, 1, 1, 30},
-    ['T'] = {31, 4, 4, 4, 4, 4, 4}, ['U'] = {17, 17, 17, 17, 17, 17, 14},
-    ['V'] = {17, 17, 17, 17, 17, 10, 4}, ['Y'] = {17, 17, 10, 4, 4, 4, 4},
-    ['0'] = {14, 17, 19, 21, 25, 17, 14}, ['1'] = {4, 12, 4, 4, 4, 4, 14},
-    ['2'] = {14, 17, 1, 2, 4, 8, 31}, ['3'] = {30, 1, 1, 14, 1, 1, 30},
-    ['4'] = {2, 6, 10, 18, 31, 2, 2}, ['5'] = {31, 16, 16, 30, 1, 1, 30},
-    ['6'] = {14, 16, 16, 30, 17, 17, 14}, ['7'] = {31, 1, 2, 4, 8, 8, 8},
-    ['8'] = {14, 17, 17, 14, 17, 17, 14}, ['9'] = {14, 17, 17, 15, 1, 1, 14},
-    [' '] = {0, 0, 0, 0, 0, 0, 0}, ['-'] = {0, 0, 0, 31, 0, 0, 0},
-    [':'] = {0, 4, 0, 0, 4, 0, 0},
-    ['/'] = {1, 2, 4, 8, 16, 0, 0}, ['>'] = {16, 8, 4, 2, 4, 8, 16}
-};
-
 static void draw_text(SDL_Renderer *renderer, const char *text, int x, int y,
                       int scale, SDL_Color color) {
   SDL_SetRenderDrawColor(renderer, color.r, color.g, color.b, color.a);
@@ -134,7 +115,7 @@ static void draw_text(SDL_Renderer *renderer, const char *text, int x, int y,
       c = (unsigned char)(c - 'a' + 'A');
     for (int row = 0; row < 7; row++)
       for (int bit = 0; bit < 5; bit++)
-        if (font[c][row] & (1u << (4 - bit))) {
+        if (ui_assets.font[c][row] & (1u << (4 - bit))) {
           SDL_Rect pixel = {x + bit * scale, y + row * scale, scale, scale};
           SDL_RenderFillRect(renderer, &pixel);
         }
@@ -444,45 +425,32 @@ static void draw_button(SDL_Renderer *renderer, SDL_Rect rect, int pressed,
   SDL_RenderDrawRect(renderer, &rect);
 }
 
-static void draw_arrow(SDL_Renderer *renderer, int x, int y, int dx, int dy) {
-  int tip_x = x + dx * 8, tip_y = y + dy * 8;
+static void draw_ui_icon(SDL_Renderer *renderer, const uint8_t *rows, int x,
+                         int y, int scale) {
   SDL_SetRenderDrawColor(renderer, 245, 245, 245, 230);
-  SDL_RenderDrawLine(renderer, x - dx * 8, y - dy * 8, x + dx * 8,
-                     y + dy * 8);
-  SDL_RenderDrawLine(renderer, tip_x, tip_y, tip_x - dx * 4 + dy * 4,
-                     tip_y - dy * 4 - dx * 4);
-  SDL_RenderDrawLine(renderer, tip_x, tip_y, tip_x - dx * 4 - dy * 4,
-                     tip_y - dy * 4 + dx * 4);
+  for (int row = 0; row < 7; row++)
+    for (int bit = 0; bit < 7; bit++)
+      if (rows[row] & (1u << (6 - bit))) {
+        SDL_Rect pixel = {x - 3 * scale + bit * scale,
+                          y - 3 * scale + row * scale, scale, scale};
+        SDL_RenderFillRect(renderer, &pixel);
+      }
+}
+
+static void draw_arrow(SDL_Renderer *renderer, int x, int y, unsigned direction) {
+  draw_ui_icon(renderer, ui_assets.arrow[direction], x, y, 3);
 }
 
 static void draw_settings_button(SDL_Renderer *renderer) {
   SDL_Rect rect = {600, 704, 32, 32};
   draw_button(renderer, rect, 0, 0);
-  SDL_SetRenderDrawColor(renderer, 245, 245, 245, 230);
-  SDL_RenderDrawRect(renderer, &(SDL_Rect){610, 714, 12, 12});
-  SDL_RenderDrawLine(renderer, 616, 710, 616, 714);
-  SDL_RenderDrawLine(renderer, 616, 726, 616, 730);
-  SDL_RenderDrawLine(renderer, 606, 720, 610, 720);
-  SDL_RenderDrawLine(renderer, 622, 720, 626, 720);
-  SDL_RenderDrawLine(renderer, 609, 713, 612, 716);
-  SDL_RenderDrawLine(renderer, 620, 724, 623, 727);
-  SDL_RenderDrawLine(renderer, 623, 713, 620, 716);
-  SDL_RenderDrawLine(renderer, 612, 724, 609, 727);
+  draw_ui_icon(renderer, ui_assets.cog, 616, 720, 2);
 }
 
 static void draw_debug_button(SDL_Renderer *renderer) {
   SDL_Rect rect = {560, 704, 32, 32};
   draw_button(renderer, rect, 0, 0);
-  SDL_SetRenderDrawColor(renderer, 245, 245, 245, 230);
-  SDL_RenderDrawRect(renderer, &(SDL_Rect){568, 712, 16, 16});
-  SDL_RenderDrawLine(renderer, 576, 708, 576, 712);
-  SDL_RenderDrawLine(renderer, 576, 728, 576, 732);
-  SDL_RenderDrawLine(renderer, 564, 716, 568, 716);
-  SDL_RenderDrawLine(renderer, 584, 716, 588, 716);
-  SDL_RenderDrawLine(renderer, 564, 724, 568, 724);
-  SDL_RenderDrawLine(renderer, 584, 724, 588, 724);
-  SDL_RenderDrawLine(renderer, 570, 709, 572, 712);
-  SDL_RenderDrawLine(renderer, 582, 709, 580, 712);
+  draw_ui_icon(renderer, ui_assets.bug, 576, 720, 2);
 }
 
 static int controller_button_at(int x, int y) {
@@ -533,10 +501,10 @@ static void draw_controller(SDL_Renderer *renderer, uint8_t buttons,
   draw_button(renderer, rect, buttons & (1 << 1), remapping == 1);
   rect = (SDL_Rect){96, 656, 32, 32};
   draw_button(renderer, rect, buttons & (1 << 0), remapping == 0);
-  draw_arrow(renderer, 80, 640, 0, -1);
-  draw_arrow(renderer, 80, 704, 0, 1);
-  draw_arrow(renderer, 48, 672, -1, 0);
-  draw_arrow(renderer, 112, 672, 1, 0);
+  draw_arrow(renderer, 80, 640, 0);
+  draw_arrow(renderer, 80, 704, 1);
+  draw_arrow(renderer, 48, 672, 2);
+  draw_arrow(renderer, 112, 672, 3);
   rect = (SDL_Rect){264, 656, 48, 24};
   draw_button(renderer, rect, buttons & (1 << 6), remapping == 6);
   rect = (SDL_Rect){328, 656, 48, 24};
@@ -551,6 +519,16 @@ static void draw_controller(SDL_Renderer *renderer, uint8_t buttons,
   draw_text(renderer, "A", 591, 625, 2, (SDL_Color){245, 245, 245, 230});
   draw_debug_button(renderer);
   draw_settings_button(renderer);
+}
+
+static int load_ui_assets(void) {
+  static const char *const paths[] = {
+      "ui_assets.txt", "src/frontend/sdl/ui_assets.txt",
+      "../src/frontend/sdl/ui_assets.txt"};
+  for (size_t i = 0; i < sizeof paths / sizeof *paths; i++)
+    if (gb_ui_assets_load(&ui_assets, paths[i]) == 0)
+      return 0;
+  return -1;
 }
 
 int main(int argc, char **argv) {
@@ -642,6 +620,12 @@ int main(int argc, char **argv) {
     free(file);
   }
   if (SDL_Init(SDL_INIT_VIDEO | SDL_INIT_EVENTS | SDL_INIT_AUDIO)) {
+    free(state);
+    gb_destroy(gb);
+    return 1;
+  }
+  if (load_ui_assets() != 0) {
+    SDL_Quit();
     free(state);
     gb_destroy(gb);
     return 1;
