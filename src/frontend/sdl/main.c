@@ -51,13 +51,130 @@ static void save_state(const gb_t *gb, const char *path, uint8_t *buffer,
     write_file(path, buffer, size);
 }
 
-static void audio(void *user, const int16_t *stereo, size_t frames) {
-  SDL_AudioDeviceID device = *(SDL_AudioDeviceID *)user;
-  const uint32_t bytes = (uint32_t)(frames * 2 * sizeof *stereo);
+typedef struct {
+  SDL_AudioDeviceID device;
+  unsigned volume;
+} audio_context_t;
 
-  if (SDL_GetQueuedAudioSize(device) > bytes * 2)
+static void audio(void *user, const int16_t *stereo, size_t frames) {
+  audio_context_t *context = user;
+  const uint32_t bytes = (uint32_t)(frames * 2 * sizeof *stereo);
+  int16_t *scaled = NULL;
+
+  if (SDL_GetQueuedAudioSize(context->device) > bytes * 2)
     return;
-  SDL_QueueAudio(device, stereo, bytes);
+  if (context->volume == 100) {
+    SDL_QueueAudio(context->device, stereo, bytes);
+    return;
+  }
+  scaled = malloc(frames * 2 * sizeof *scaled);
+  if (!scaled)
+    return;
+  for (size_t i = 0; i < frames * 2; i++)
+    scaled[i] = (int16_t)((int)stereo[i] * (int)context->volume / 100);
+  SDL_QueueAudio(context->device, scaled, bytes);
+  free(scaled);
+}
+
+static const uint8_t font[128][7] = {
+    ['A'] = {14, 17, 17, 31, 17, 17, 17}, ['B'] = {30, 17, 17, 30, 17, 17, 30},
+    ['C'] = {14, 17, 16, 16, 16, 17, 14}, ['D'] = {30, 17, 17, 17, 17, 17, 30},
+    ['E'] = {31, 16, 16, 30, 16, 16, 31}, ['F'] = {31, 16, 16, 30, 16, 16, 16},
+    ['G'] = {14, 17, 16, 23, 17, 17, 14}, ['H'] = {17, 17, 17, 31, 17, 17, 17},
+    ['I'] = {31, 4, 4, 4, 4, 4, 31}, ['L'] = {16, 16, 16, 16, 16, 16, 31},
+    ['M'] = {17, 27, 21, 21, 17, 17, 17}, ['N'] = {17, 25, 21, 19, 17, 17, 17},
+    ['O'] = {14, 17, 17, 17, 17, 17, 14}, ['P'] = {30, 17, 17, 30, 16, 16, 16},
+    ['R'] = {30, 17, 17, 30, 20, 18, 17}, ['S'] = {15, 16, 16, 14, 1, 1, 30},
+    ['T'] = {31, 4, 4, 4, 4, 4, 4}, ['U'] = {17, 17, 17, 17, 17, 17, 14},
+    ['V'] = {17, 17, 17, 17, 17, 10, 4}, ['Y'] = {17, 17, 10, 4, 4, 4, 4},
+    ['0'] = {14, 17, 19, 21, 25, 17, 14}, ['1'] = {4, 12, 4, 4, 4, 4, 14},
+    ['2'] = {14, 17, 1, 2, 4, 8, 31}, ['3'] = {30, 1, 1, 14, 1, 1, 30},
+    ['4'] = {2, 6, 10, 18, 31, 2, 2}, ['5'] = {31, 16, 16, 30, 1, 1, 30},
+    ['6'] = {14, 16, 16, 30, 17, 17, 14}, ['7'] = {31, 1, 2, 4, 8, 8, 8},
+    ['8'] = {14, 17, 17, 14, 17, 17, 14}, ['9'] = {14, 17, 17, 15, 1, 1, 14},
+    [' '] = {0, 0, 0, 0, 0, 0, 0}, ['-'] = {0, 0, 0, 31, 0, 0, 0},
+    [':'] = {0, 4, 0, 0, 4, 0, 0}, ['/'] = {1, 2, 4, 8, 16, 0, 0}
+};
+
+static void draw_text(SDL_Renderer *renderer, const char *text, int x, int y,
+                      int scale, SDL_Color color) {
+  SDL_SetRenderDrawColor(renderer, color.r, color.g, color.b, color.a);
+  for (; *text; text++, x += 6 * scale) {
+    unsigned char c = (unsigned char)*text;
+    for (int row = 0; row < 7; row++)
+      for (int bit = 0; bit < 5; bit++)
+        if (font[c][row] & (1u << (4 - bit))) {
+          SDL_Rect pixel = {x + bit * scale, y + row * scale, scale, scale};
+          SDL_RenderFillRect(renderer, &pixel);
+        }
+  }
+}
+
+static uint8_t mapped_button(SDL_Keycode key, const SDL_Keycode keys[8]) {
+  for (unsigned i = 0; i < 8; i++)
+    if (keys[i] == key)
+      return (uint8_t)(1u << i);
+  return 0;
+}
+
+typedef struct {
+  int open;
+  int selected;
+  int remapping;
+  int palette;
+  char path[256];
+  size_t path_length;
+} settings_t;
+
+static const char *setting_names[] = {
+    "LOAD ROM", "SAVE", "LOAD SAVE", "SAVE STATE", "LOAD STATE",
+    "VOLUME", "CHANGE PALETTE", "REMAP KEYS", "RESET", "CLOSE"};
+
+static void draw_settings(SDL_Renderer *renderer, const settings_t *settings,
+                          unsigned volume, const SDL_Keycode keys[8]) {
+  SDL_Rect panel = {70, 45, 500, 485};
+  SDL_SetRenderDrawBlendMode(renderer, SDL_BLENDMODE_BLEND);
+  SDL_SetRenderDrawColor(renderer, 8, 12, 20, 245);
+  SDL_RenderFillRect(renderer, &panel);
+  SDL_SetRenderDrawColor(renderer, 110, 210, 190, 255);
+  SDL_RenderDrawRect(renderer, &panel);
+  draw_text(renderer, "SETTINGS", 105, 70, 4, (SDL_Color){220, 250, 235, 255});
+  for (unsigned i = 0; i < sizeof setting_names / sizeof *setting_names; i++) {
+    int y = 125 + (int)i * 32;
+    SDL_Color color = i == (unsigned)settings->selected
+                          ? (SDL_Color){20, 80, 70, 255}
+                          : (SDL_Color){18, 28, 40, 255};
+    SDL_Rect row = {100, y - 5, 440, 27};
+    SDL_SetRenderDrawColor(renderer, color.r, color.g, color.b, color.a);
+    SDL_RenderFillRect(renderer, &row);
+    draw_text(renderer, setting_names[i], 112, y, 2,
+              (SDL_Color){235, 245, 240, 255});
+    if (i == 5) {
+      char value[16];
+      snprintf(value, sizeof value, "%u%%", volume);
+      draw_text(renderer, value, 455, y, 2, (SDL_Color){180, 230, 210, 255});
+    } else if (i == 6) {
+      char value[16];
+      snprintf(value, sizeof value, "%d", settings->palette + 1);
+      draw_text(renderer, value, 500, y, 2, (SDL_Color){180, 230, 210, 255});
+    }
+  }
+  if (settings->remapping >= 0) {
+    SDL_Rect modal = {120, 210, 400, 100};
+    SDL_SetRenderDrawColor(renderer, 20, 25, 35, 255);
+    SDL_RenderFillRect(renderer, &modal);
+    char prompt[32];
+    snprintf(prompt, sizeof prompt, "KEY %d OF 8", settings->remapping + 1);
+    draw_text(renderer, prompt, 185, 240, 3,
+              (SDL_Color){255, 240, 180, 255});
+  } else if (settings->path_length) {
+    draw_text(renderer, settings->path, 112, 475, 2,
+              (SDL_Color){180, 230, 210, 255});
+  }
+  if (settings->remapping < 0 && settings->selected == 0)
+    draw_text(renderer, "TYPE PATH THEN ENTER", 112, 475, 2,
+              (SDL_Color){180, 230, 210, 255});
+  (void)keys;
 }
 
 static void draw_boot_logo(SDL_Renderer *renderer, int y) {
@@ -158,7 +275,8 @@ static void draw_controller(SDL_Renderer *renderer, uint8_t buttons) {
 
 int main(int argc, char **argv) {
   int debug = 0;
-  const char *path = NULL, *boot_path = NULL;
+  char path[4096] = "";
+  const char *boot_path = NULL;
   char save_path[4096], state_path[4096];
   size_t rom_size, file_size, boot_size = 0;
   uint8_t *rom = NULL, *file = NULL, *state = NULL;
@@ -168,6 +286,10 @@ int main(int argc, char **argv) {
   SDL_Renderer *renderer = NULL;
   SDL_Texture *texture = NULL;
   SDL_AudioDeviceID audio_device = 0;
+  audio_context_t audio_context = {0, 100};
+  settings_t settings = {0, 0, -1, 0, "", 0};
+  SDL_Keycode keys[8] = {SDLK_RIGHT, SDLK_LEFT, SDLK_UP, SDLK_DOWN,
+                         SDLK_z, SDLK_x, SDLK_LSHIFT, SDLK_RETURN};
   int running = 1, paused = debug;
   unsigned save_timer = 0;
   uint8_t buttons = 0;
@@ -177,14 +299,15 @@ int main(int argc, char **argv) {
       debug = 1;
     } else if (strcmp(argv[i], "--boot-rom") == 0 && i + 1 < argc) {
       boot_path = argv[++i];
-    } else if (!path) {
-      path = argv[i];
+    } else if (!path[0]) {
+      if (snprintf(path, sizeof path, "%s", argv[i]) >= (int)sizeof path)
+        path[0] = '\0';
     } else {
-      path = NULL;
+      path[0] = '\0';
       break;
     }
   }
-  if (!path) {
+  if (!path[0]) {
     fprintf(stderr, "usage: %s [--debug] [--boot-rom FILE] ROM\n", argv[0]);
     return 2;
   }
@@ -262,7 +385,8 @@ int main(int argc, char **argv) {
   want.samples = 1024;
   audio_device = SDL_OpenAudioDevice(NULL, 0, &want, NULL, 0);
   if (audio_device) {
-    gb_set_audio_callback(gb, audio, &audio_device);
+    audio_context.device = audio_device;
+    gb_set_audio_callback(gb, audio, &audio_context);
     SDL_PauseAudioDevice(audio_device, 0);
   }
   if (gb_rom_logo_valid(gb)) {
@@ -291,11 +415,91 @@ int main(int argc, char **argv) {
 #endif
   while (running) {
     SDL_Event event;
-    while (SDL_PollEvent(&event)) {
+      while (SDL_PollEvent(&event)) {
       if (event.type == SDL_QUIT)
         running = 0;
+      if (settings.open) {
+        if (event.type == SDL_TEXTINPUT && settings.selected == 0 &&
+            settings.path_length + strlen(event.text.text) < sizeof settings.path) {
+          strcpy(settings.path + settings.path_length, event.text.text);
+          settings.path_length += strlen(event.text.text);
+        }
+        if (event.type == SDL_KEYDOWN) {
+          SDL_Keycode key = event.key.keysym.sym;
+          if (settings.remapping >= 0 && key != SDLK_ESCAPE) {
+            keys[settings.remapping] = key;
+            settings.remapping++;
+            if (settings.remapping == 8)
+              settings.remapping = -1;
+          } else if (key == SDLK_ESCAPE) {
+            settings.open = 0;
+            settings.remapping = -1;
+            SDL_StopTextInput();
+          } else if (key == SDLK_UP && settings.selected > 0) {
+            settings.selected--;
+          } else if (key == SDLK_DOWN && settings.selected < 9) {
+            settings.selected++;
+          } else if (key == SDLK_LEFT && settings.selected == 5 && audio_context.volume >= 10) {
+            audio_context.volume -= 10;
+          } else if (key == SDLK_RIGHT && settings.selected == 5 && audio_context.volume <= 90) {
+            audio_context.volume += 10;
+          } else if ((key == SDLK_RETURN || key == SDLK_KP_ENTER) && settings.selected == 0) {
+            size_t new_size;
+            uint8_t *new_rom = read_file(settings.path, &new_size);
+            if (new_rom && gb_load_rom(gb, new_rom, new_size) == 0) {
+              strncpy(path, settings.path, sizeof save_path - 1);
+              path[sizeof save_path - 1] = '\0';
+              if (snprintf(save_path, sizeof save_path, "%s.sav", path) >=
+                      (int)sizeof save_path ||
+                  snprintf(state_path, sizeof state_path, "%s.state", path) >=
+                      (int)sizeof state_path) {
+                free(new_rom);
+                settings.path_length = 0;
+                settings.path[0] = '\0';
+                continue;
+              }
+              free(state);
+              state_size = gb_save_state_size(gb);
+              state = malloc(state_size);
+            }
+            free(new_rom);
+            settings.path_length = 0;
+            settings.path[0] = '\0';
+          } else if ((key == SDLK_RETURN || key == SDLK_KP_ENTER) && settings.selected == 1) {
+            save_ram(gb, save_path);
+          } else if ((key == SDLK_RETURN || key == SDLK_KP_ENTER) && settings.selected == 2) {
+            file = read_file(save_path, &file_size);
+            if (file) { gb_load_ram(gb, file, file_size); free(file); }
+          } else if ((key == SDLK_RETURN || key == SDLK_KP_ENTER) && settings.selected == 3) {
+            save_state(gb, state_path, state, state_size);
+          } else if ((key == SDLK_RETURN || key == SDLK_KP_ENTER) && settings.selected == 4) {
+            file = read_file(state_path, &file_size);
+            if (file) { if (file_size == state_size) gb_load_state(gb, file, file_size); free(file); }
+          } else if ((key == SDLK_RETURN || key == SDLK_KP_ENTER) && settings.selected == 6) {
+            settings.palette = (settings.palette + 1) % 3;
+          } else if ((key == SDLK_RETURN || key == SDLK_KP_ENTER) && settings.selected == 7) {
+            settings.remapping = 0;
+          } else if ((key == SDLK_RETURN || key == SDLK_KP_ENTER) && settings.selected == 8) {
+            gb_reset(gb);
+          } else if ((key == SDLK_RETURN || key == SDLK_KP_ENTER) && settings.selected == 9) {
+            settings.open = 0;
+            SDL_StopTextInput();
+          } else if (key == SDLK_BACKSPACE && settings.selected == 0 && settings.path_length) {
+            settings.path[--settings.path_length] = '\0';
+          }
+        }
+        continue;
+      }
+      if (event.type == SDL_KEYDOWN && event.key.keysym.sym == SDLK_ESCAPE) {
+        settings.open = 1;
+        settings.selected = 0;
+        settings.path_length = 0;
+        settings.path[0] = '\0';
+        SDL_StartTextInput();
+        continue;
+      }
       if (event.type == SDL_KEYDOWN || event.type == SDL_KEYUP) {
-        uint8_t button = gb_sdl_key_button(event.key.keysym.sym);
+        uint8_t button = mapped_button(event.key.keysym.sym, keys);
         if (button) {
           if (event.type == SDL_KEYDOWN)
             buttons |= button;
@@ -341,11 +545,19 @@ int main(int argc, char **argv) {
       save_timer = 0;
     }
     SDL_UpdateTexture(texture, NULL, gb_framebuffer(gb), 160 * 4);
+    if (settings.palette == 1)
+      SDL_SetTextureColorMod(texture, 190, 235, 190);
+    else if (settings.palette == 2)
+      SDL_SetTextureColorMod(texture, 235, 210, 160);
+    else
+      SDL_SetTextureColorMod(texture, 255, 255, 255);
     SDL_SetRenderDrawColor(renderer, 18, 20, 28, 255);
     SDL_RenderClear(renderer);
     SDL_Rect game_rect = {0, 0, 640, 576};
     SDL_RenderCopy(renderer, texture, NULL, &game_rect);
     draw_controller(renderer, buttons);
+    if (settings.open)
+      draw_settings(renderer, &settings, audio_context.volume, keys);
     SDL_RenderPresent(renderer);
     SDL_Delay(16);
   }
