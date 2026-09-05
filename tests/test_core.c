@@ -908,6 +908,64 @@ UTEST(core, apu_frequency_register_increases_pitch) {
   gb_destroy(g);
 }
 
+static unsigned count_transitions(gb_t *g, unsigned frames) {
+  audio_calls = audio_transitions = 0;
+  audio_last_sign = 0;
+  for (unsigned i = 0; i < frames; i++)
+    gb_run_frame(g);
+  return audio_transitions;
+}
+
+UTEST(core, apu_square_pitch_matches_register) {
+  gb_t *g = load((const uint8_t[]){0x00}, 1);
+  gb_set_audio_callback(g, audio_callback, NULL);
+  gb_dbg_write(g, 0xff26, 0x80);
+  gb_dbg_write(g, 0xff24, 0x77);
+  gb_dbg_write(g, 0xff25, 0x11);
+  gb_dbg_write(g, 0xff11, 0x80);
+  gb_dbg_write(g, 0xff12, 0xf0);
+  gb_dbg_write(g, 0xff13, 0x00);
+  gb_dbg_write(g, 0xff14, 0x87);
+  /* 131072 / (2048 - 0x700) = 512 Hz over ~1.0047 s: ~1029 transitions. */
+  unsigned t = count_transitions(g, 60);
+  ASSERT_TRUE(t > 950 && t < 1100);
+  gb_destroy(g);
+}
+
+UTEST(core, apu_sweep_disabled_leaves_frequency) {
+  gb_t *g = load((const uint8_t[]){0x00}, 1);
+  gb_dbg_write(g, 0xff26, 0x80);
+  gb_dbg_write(g, 0xff10, 0x00);
+  gb_dbg_write(g, 0xff11, 0x80);
+  gb_dbg_write(g, 0xff12, 0xf0);
+  gb_dbg_write(g, 0xff13, 0x00);
+  gb_dbg_write(g, 0xff14, 0x84);
+  for (unsigned i = 0; i < 60; i++)
+    gb_run_frame(g);
+  ASSERT_EQ(gb_dbg_read(g, 0xff13), 0x00);
+  ASSERT_EQ(gb_dbg_read(g, 0xff14) & 7, 4);
+  ASSERT_TRUE(gb_dbg_read(g, 0xff26) & 1);
+  gb_destroy(g);
+}
+
+UTEST(core, apu_wave_pitch_matches_register) {
+  gb_t *g = load((const uint8_t[]){0x00}, 1);
+  gb_set_audio_callback(g, audio_callback, NULL);
+  gb_dbg_write(g, 0xff26, 0x80);
+  gb_dbg_write(g, 0xff24, 0x77);
+  gb_dbg_write(g, 0xff25, 0x44);
+  for (uint16_t a = 0xff30; a <= 0xff3f; a++)
+    gb_dbg_write(g, a, a < 0xff38 ? 0xff : 0x00);
+  gb_dbg_write(g, 0xff1a, 0x80);
+  gb_dbg_write(g, 0xff1c, 0x20);
+  gb_dbg_write(g, 0xff1d, 0x00);
+  gb_dbg_write(g, 0xff1e, 0x87);
+  /* 65536 / (2048 - 0x700) = 256 Hz over ~1.0047 s: ~514 transitions. */
+  unsigned t = count_transitions(g, 60);
+  ASSERT_TRUE(t > 470 && t < 560);
+  gb_destroy(g);
+}
+
 UTEST(core, extended_control_and_stack_opcodes) {
   static const uint8_t code[] = {
       0x01, 0x34, 0x12, 0x21, 0x00, 0x10, 0x09, 0x0b, 0xc5,
@@ -1011,11 +1069,14 @@ int main(void) {
   core_apu_square_channel();
   core_apu_wave_and_noise_channels();
   core_apu_frequency_register_increases_pitch();
+  core_apu_square_pitch_matches_register();
+  core_apu_sweep_disabled_leaves_frequency();
+  core_apu_wave_pitch_matches_register();
   core_extended_control_and_stack_opcodes();
   core_conditional_relative_and_signed_stack_arithmetic();
   core_oam_dma_transfer();
   core_timer_uses_divider_edges();
   ppu_stat_write_rechecks_coincidence();
-  puts("23 tests passed");
+  puts("26 tests passed");
   return 0;
 }

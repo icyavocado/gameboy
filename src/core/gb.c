@@ -166,13 +166,9 @@ static void audio_trigger(gb_t *g, unsigned channel) {
   }
   if (channel == 2)
     g->audio_volume[2] = (uint8_t)((g->mem[0xff1c] >> 5) & 3);
-  if (channel == 3) {
-    g->audio_volume[3] = g->mem[0xff21] >> 4;
-    g->audio_envelope_timer[3] = (uint8_t)(g->mem[0xff21] & 15);
-    if (!g->audio_envelope_timer[3]) g->audio_envelope_timer[3] = 8;
-  } else if (channel != 2) {
+  if (channel != 2) {
     g->audio_volume[channel] = g->mem[volume_reg[channel]] >> 4;
-    g->audio_envelope_timer[channel] = g->mem[volume_reg[channel]] & 15;
+    g->audio_envelope_timer[channel] = g->mem[volume_reg[channel]] & 7;
     if (!g->audio_envelope_timer[channel]) g->audio_envelope_timer[channel] = 8;
   }
   if (channel == 0) {
@@ -200,10 +196,11 @@ static int16_t audio_sample(gb_t *g, unsigned channel) {
     uint8_t sample = (g->mem[0xff30 + index / 2] >> (index & 1 ? 0 : 4)) & 15;
     uint16_t frequency = (uint16_t)((g->mem[freq_high[channel]] & 7) << 8 |
                                     g->mem[freq_low[channel]]);
+    /* 32 samples per period map to 2^21 phase units; sample clock is
+       2097152/(2048-f) Hz, so one period is 65536/(2048-f) Hz. */
     if (frequency < 2048)
       g->audio_host_phase[2] +=
-          (uint32_t)((((uint64_t)AUDIO_CLOCK * 65536u) /
-                      (32u * (2048u - frequency))) /
+          (uint32_t)((((uint64_t)65536u << 21) / (2048u - frequency)) /
                      AUDIO_RATE);
     if (!volume) return 0;
     if (volume == 1) return (int16_t)(((int)sample - 8) * 128);
@@ -211,10 +208,10 @@ static int16_t audio_sample(gb_t *g, unsigned channel) {
     return (int16_t)(((int)sample - 8) * 32);
   }
   if (channel == 3) {
-    control = g->mem[volume_reg[channel]];
-    if (!(control >> 4))
+    uint8_t volume = g->audio_volume[3];
+    if (!volume)
       return 0;
-    return (int16_t)((control >> 4) * (!(g->noise_lfsr & 1) ? 512 : -512));
+    return (int16_t)(volume * (!(g->noise_lfsr & 1) ? 512 : -512));
   }
   uint8_t volume = g->audio_volume[channel], duty_index = g->mem[duty_reg[channel]] >> 6;
   uint16_t frequency = (uint16_t)((g->mem[freq_high[channel]] & 7) << 8 |
@@ -297,19 +294,29 @@ static void audio_frame(gb_t *g) {
   if (g->audio && (g->mem[0xff26] & 0x80))
     g->audio(g->audio_user, samples, frames);
 }
+static int audio_sweep_next(gb_t *g) {
+  int delta = g->audio_sweep_shadow >> (g->mem[0xff10] & 7);
+  return g->audio_sweep_negate ? (int)g->audio_sweep_shadow - delta
+                               : (int)g->audio_sweep_shadow + delta;
+}
 static void audio_sweep(gb_t *g) {
-  uint8_t nr10 = g->mem[0xff10];
-  int delta = g->audio_sweep_shadow >> (nr10 & 7);
-  int next = g->audio_sweep_negate ? (int)g->audio_sweep_shadow - delta
-                                   : (int)g->audio_sweep_shadow + delta;
+  uint8_t shift = g->mem[0xff10] & 7;
+  int next = audio_sweep_next(g);
   if (next > 2047 || next < 0) {
     g->audio_enabled[0] = 0;
     g->mem[0xff26] &= (uint8_t)~1;
     return;
   }
+  if (!shift)
+    return;
   g->audio_sweep_shadow = (uint16_t)next;
   g->mem[0xff13] = (uint8_t)next;
   g->mem[0xff14] = (uint8_t)((g->mem[0xff14] & 0xf8) | (next >> 8));
+  next = audio_sweep_next(g);
+  if (next > 2047 || next < 0) {
+    g->audio_enabled[0] = 0;
+    g->mem[0xff26] &= (uint8_t)~1;
+  }
 }
 static void audio_sequence(gb_t *g) {
   static const uint16_t length_reg[] = {0xff11, 0xff16, 0xff1b, 0xff20};
@@ -326,7 +333,8 @@ static void audio_sequence(gb_t *g) {
   }
   if (step == 2 || step == 6) {
     if (g->audio_sweep_timer && --g->audio_sweep_timer == 0) {
-      audio_sweep(g);
+      if (g->audio_sweep_enabled && ((g->mem[0xff10] >> 4) & 7))
+        audio_sweep(g);
       g->audio_sweep_timer = (g->mem[0xff10] >> 4) & 7;
       if (!g->audio_sweep_timer) g->audio_sweep_timer = 8;
     }
@@ -338,17 +346,17 @@ static void audio_sequence(gb_t *g) {
       uint8_t control = g->mem[base + (i == 3 ? 1 : 2)];
       uint8_t timer = g->audio_envelope_timer[i];
       uint8_t period = (uint8_t)(control & 7);
-      if (!period)
-        period = 8;
       if (timer && --timer == 0) {
         uint8_t volume = g->audio_volume[i];
-        if (control & 8) {
-          if (volume < 15) volume++;
-        } else if (volume) {
-          volume--;
+        if (period) {
+          if (control & 8) {
+            if (volume < 15) volume++;
+          } else if (volume) {
+            volume--;
+          }
         }
         g->audio_volume[i] = volume;
-         timer = period;
+        timer = period ? period : 8;
       }
       g->audio_envelope_timer[i] = timer;
     }

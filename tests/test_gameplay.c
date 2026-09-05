@@ -101,7 +101,10 @@ int main(void) {
   free(rom);
   gb_set_audio_callback(gb, audio_probe, &audio);
 
-  gb_run_frame(gb);
+  /* The copyright screen is silent for several seconds: channels are
+     triggered with envelope volume 0 and period 0, which must stay mute. */
+  for (unsigned i = 0; i < 360; i++)
+    gb_run_frame(gb);
   title = framebuffer_hash(gb);
   if (audio.energy != 0) {
     fprintf(stderr, "Tetris produced startup audio: energy=%llu\n",
