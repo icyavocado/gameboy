@@ -1,10 +1,13 @@
 #include "gb.h"
 #include "input.h"
 #include <SDL.h>
+#include <dirent.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <strings.h>
 #include <string.h>
+#include <sys/stat.h>
 #ifdef GB_ENABLE_TUI
 #include <ncurses.h>
 #endif
@@ -51,6 +54,30 @@ static void save_state(const gb_t *gb, const char *path, uint8_t *buffer,
     write_file(path, buffer, size);
 }
 
+static int state_slot_path(const char *base, unsigned slot, char *path,
+                           size_t size) {
+  return snprintf(path, size, "%s%u", base, slot + 1) < (int)size ? 0 : -1;
+}
+
+static int state_slot_exists(const char *base, unsigned slot) {
+  char path[4096];
+  struct stat info;
+  return state_slot_path(base, slot, path, sizeof path) == 0 &&
+         stat(path, &info) == 0 && S_ISREG(info.st_mode);
+}
+
+static int save_slot_path(const char *base, unsigned slot, char *path,
+                          size_t size) {
+  return snprintf(path, size, "%s%u", base, slot + 1) < (int)size ? 0 : -1;
+}
+
+static int save_slot_exists(const char *base, unsigned slot) {
+  char path[4096];
+  struct stat info;
+  return save_slot_path(base, slot, path, sizeof path) == 0 &&
+         stat(path, &info) == 0 && S_ISREG(info.st_mode);
+}
+
 typedef struct {
   SDL_AudioDeviceID device;
   unsigned volume;
@@ -81,7 +108,8 @@ static const uint8_t font[128][7] = {
     ['C'] = {14, 17, 16, 16, 16, 17, 14}, ['D'] = {30, 17, 17, 17, 17, 17, 30},
     ['E'] = {31, 16, 16, 30, 16, 16, 31}, ['F'] = {31, 16, 16, 30, 16, 16, 16},
     ['G'] = {14, 17, 16, 23, 17, 17, 14}, ['H'] = {17, 17, 17, 31, 17, 17, 17},
-    ['I'] = {31, 4, 4, 4, 4, 4, 31}, ['L'] = {16, 16, 16, 16, 16, 16, 31},
+    ['I'] = {31, 4, 4, 4, 4, 4, 31}, ['K'] = {17, 18, 20, 24, 20, 18, 17},
+    ['L'] = {16, 16, 16, 16, 16, 16, 31},
     ['M'] = {17, 27, 21, 21, 17, 17, 17}, ['N'] = {17, 25, 21, 19, 17, 17, 17},
     ['O'] = {14, 17, 17, 17, 17, 17, 14}, ['P'] = {30, 17, 17, 30, 16, 16, 16},
     ['R'] = {30, 17, 17, 30, 20, 18, 17}, ['S'] = {15, 16, 16, 14, 1, 1, 30},
@@ -93,7 +121,8 @@ static const uint8_t font[128][7] = {
     ['6'] = {14, 16, 16, 30, 17, 17, 14}, ['7'] = {31, 1, 2, 4, 8, 8, 8},
     ['8'] = {14, 17, 17, 14, 17, 17, 14}, ['9'] = {14, 17, 17, 15, 1, 1, 14},
     [' '] = {0, 0, 0, 0, 0, 0, 0}, ['-'] = {0, 0, 0, 31, 0, 0, 0},
-    [':'] = {0, 4, 0, 0, 4, 0, 0}, ['/'] = {1, 2, 4, 8, 16, 0, 0}
+    [':'] = {0, 4, 0, 0, 4, 0, 0},
+    ['/'] = {1, 2, 4, 8, 16, 0, 0}, ['>'] = {16, 8, 4, 2, 4, 8, 16}
 };
 
 static void draw_text(SDL_Renderer *renderer, const char *text, int x, int y,
@@ -101,6 +130,8 @@ static void draw_text(SDL_Renderer *renderer, const char *text, int x, int y,
   SDL_SetRenderDrawColor(renderer, color.r, color.g, color.b, color.a);
   for (; *text; text++, x += 6 * scale) {
     unsigned char c = (unsigned char)*text;
+    if (c >= 'a' && c <= 'z')
+      c = (unsigned char)(c - 'a' + 'A');
     for (int row = 0; row < 7; row++)
       for (int bit = 0; bit < 5; bit++)
         if (font[c][row] & (1u << (4 - bit))) {
@@ -118,27 +149,178 @@ static uint8_t mapped_button(SDL_Keycode key, const SDL_Keycode keys[8]) {
 }
 
 typedef struct {
+  char *path;
+  char title[17];
+} rom_entry_t;
+
+static int rom_entry_compare(const void *a, const void *b) {
+  const rom_entry_t *left = a;
+  const rom_entry_t *right = b;
+  return strcasecmp(left->title, right->title);
+}
+
+static int contains_test(const char *text) {
+  for (; *text; text++)
+    if (strncasecmp(text, "test", 4) == 0)
+      return 1;
+  return 0;
+}
+
+static void find_roms(const char *root, rom_entry_t **roms, size_t *count,
+                      int debug) {
+  DIR *directory = opendir(root);
+  struct dirent *entry;
+  if (!directory)
+    return;
+  while ((entry = readdir(directory))) {
+    char path[4096];
+    struct stat info;
+    size_t length;
+    if (entry->d_name[0] == '.' ||
+        snprintf(path, sizeof path, "%s/%s", root, entry->d_name) >=
+            (int)sizeof path ||
+        stat(path, &info) != 0)
+      continue;
+    if (S_ISDIR(info.st_mode)) {
+      find_roms(path, roms, count, debug);
+      continue;
+    }
+    length = strlen(entry->d_name);
+    if (!S_ISREG(info.st_mode) || length < 3 ||
+        strcasecmp(entry->d_name + length - 3, ".gb") != 0)
+      continue;
+    if (!debug && contains_test(entry->d_name))
+      continue;
+    {
+      uint8_t header[0x150];
+      size_t header_size;
+      uint8_t *data = read_file(path, &header_size);
+      rom_entry_t *grown;
+      if (!data || header_size < sizeof header) {
+        free(data);
+        continue;
+      }
+      memcpy(header, data, sizeof header);
+      free(data);
+      grown = realloc(*roms, (*count + 1) * sizeof **roms);
+      if (grown) {
+        *roms = grown;
+        (*roms)[*count].path = malloc(strlen(path) + 1);
+        if (!(*roms)[*count].path)
+          continue;
+        strcpy((*roms)[*count].path, path);
+        memcpy((*roms)[*count].title, header + 0x134, 16);
+        (*roms)[*count].title[16] = '\0';
+        for (int i = 15; i >= 0 &&
+                        ((*roms)[*count].title[i] == ' ' ||
+                         (*roms)[*count].title[i] == '\0');
+             i--)
+          (*roms)[*count].title[i] = '\0';
+        for (char *p = (*roms)[*count].title; *p; p++)
+          if ((unsigned char)*p < 0x20 || (unsigned char)*p > 0x7e)
+            *p = '?';
+        if (!(*roms)[*count].title[0])
+          snprintf((*roms)[*count].title, sizeof (*roms)[*count].title,
+                   "UNTITLED");
+        if (!debug && contains_test((*roms)[*count].title)) {
+          free((*roms)[*count].path);
+          continue;
+        }
+        (*count)++;
+      }
+    }
+  }
+  closedir(directory);
+}
+
+static void discover_roms(rom_entry_t **roms, size_t *count, int debug) {
+  const char *root = "tests/roms";
+  struct stat info;
+  if (stat(root, &info) != 0 || !S_ISDIR(info.st_mode))
+    root = "roms";
+  find_roms(root, roms, count, debug);
+  qsort(*roms, *count, sizeof **roms, rom_entry_compare);
+}
+
+static void free_roms(rom_entry_t *roms, size_t count) {
+  for (size_t i = 0; i < count; i++)
+    free(roms[i].path);
+  free(roms);
+}
+
+typedef struct {
   int open;
   int selected;
   int remapping;
   int palette;
-  char path[256];
-  size_t path_length;
+  int browser;
+  int confirm_load;
+  unsigned state_slot;
+  rom_entry_t *roms;
+  size_t rom_count;
+  size_t rom_selected;
 } settings_t;
+
+static void open_settings(settings_t *settings, int debug) {
+  settings->open = 1;
+  settings->selected = 0;
+  settings->browser = 0;
+  settings->confirm_load = 0;
+  free_roms(settings->roms, settings->rom_count);
+  settings->roms = NULL;
+  settings->rom_count = 0;
+  settings->rom_selected = 0;
+  discover_roms(&settings->roms, &settings->rom_count, debug);
+}
 
 static const char *setting_names[] = {
     "LOAD ROM", "SAVE", "LOAD SAVE", "SAVE STATE", "LOAD STATE",
     "VOLUME", "CHANGE PALETTE", "REMAP KEYS", "RESET", "CLOSE"};
 
 static void draw_settings(SDL_Renderer *renderer, const settings_t *settings,
-                          unsigned volume, const SDL_Keycode keys[8]) {
+                          unsigned volume, const char *save_path,
+                          const char *state_path,
+                          const SDL_Keycode keys[8]) {
   SDL_Rect panel = {70, 45, 500, 485};
   SDL_SetRenderDrawBlendMode(renderer, SDL_BLENDMODE_BLEND);
   SDL_SetRenderDrawColor(renderer, 8, 12, 20, 245);
   SDL_RenderFillRect(renderer, &panel);
   SDL_SetRenderDrawColor(renderer, 110, 210, 190, 255);
   SDL_RenderDrawRect(renderer, &panel);
-  draw_text(renderer, "SETTINGS", 105, 70, 4, (SDL_Color){220, 250, 235, 255});
+  draw_text(renderer, "SETTINGS", 105, 70, 4,
+            (SDL_Color){220, 250, 235, 255});
+  if (settings->browser) {
+    draw_text(renderer, "> LOAD ROM", 330, 78, 2,
+              (SDL_Color){180, 230, 210, 255});
+    if (!settings->rom_count) {
+      draw_text(renderer, "NO ROMS FOUND", 120, 210, 3,
+                (SDL_Color){255, 180, 160, 255});
+    } else {
+      size_t first = settings->rom_selected > 7 ? settings->rom_selected - 7 : 0;
+      size_t last = first + 10;
+      if (last > settings->rom_count)
+        last = settings->rom_count;
+      for (size_t i = first; i < last; i++) {
+        char display[70];
+        int y = 125 + (int)(i - first) * 30;
+        snprintf(display, sizeof display, "%s", settings->roms[i].title);
+        SDL_SetRenderDrawColor(renderer,
+                               i == settings->rom_selected ? 20 : 10,
+                               i == settings->rom_selected ? 80 : 20,
+                               i == settings->rom_selected ? 70 : 30, 255);
+        SDL_Rect row = {100, y - 5, 440, 25};
+        SDL_RenderFillRect(renderer, &row);
+        draw_text(renderer, display, 110, y, 2,
+                  (SDL_Color){235, 245, 240, 255});
+        if (settings->confirm_load && i == settings->rom_selected)
+          draw_text(renderer, "ENTER | ESC", 405, y, 2,
+                    (SDL_Color){255, 240, 180, 255});
+      }
+    }
+    draw_text(renderer, "ENTER LOAD  ESC BACK", 145, 475, 2,
+              (SDL_Color){180, 230, 210, 255});
+    return;
+  }
   for (unsigned i = 0; i < sizeof setting_names / sizeof *setting_names; i++) {
     int y = 125 + (int)i * 32;
     SDL_Color color = i == (unsigned)settings->selected
@@ -150,30 +332,36 @@ static void draw_settings(SDL_Renderer *renderer, const settings_t *settings,
     draw_text(renderer, setting_names[i], 112, y, 2,
               (SDL_Color){235, 245, 240, 255});
     if (i == 5) {
-      char value[16];
-      snprintf(value, sizeof value, "%u%%", volume);
-      draw_text(renderer, value, 455, y, 2, (SDL_Color){180, 230, 210, 255});
+      for (unsigned bar = 0; bar < 10; bar++) {
+        SDL_SetRenderDrawColor(renderer, bar < volume / 10 ? 120 : 45,
+                               bar < volume / 10 ? 220 : 55,
+                               bar < volume / 10 ? 190 : 65, 255);
+        SDL_Rect meter = {405 + (int)bar * 12, y - 2, 9, 16};
+        SDL_RenderFillRect(renderer, &meter);
+      }
     } else if (i == 6) {
-      char value[16];
-      snprintf(value, sizeof value, "%d", settings->palette + 1);
-      draw_text(renderer, value, 500, y, 2, (SDL_Color){180, 230, 210, 255});
+      static const char *const palettes[] = {"NONE", "GREEN", "SEPIA"};
+      const char *value = palettes[settings->palette];
+      draw_text(renderer, value, 455, y, 2, (SDL_Color){180, 230, 210, 255});
+    } else if (i >= 1 && i <= 4) {
+      for (unsigned slot = 0; slot < 5; slot++) {
+        int x = 300 + (int)slot * 42;
+        int active = slot == settings->state_slot;
+        int exists = i <= 2 ? save_slot_exists(save_path, slot)
+                            : state_slot_exists(state_path, slot);
+        SDL_SetRenderDrawColor(renderer, exists ? 35 : 18,
+                               active ? 100 : exists ? 70 : 28,
+                               exists ? 55 : 40, 255);
+        SDL_Rect slot_rect = {x - 3, y - 5, 36, 27};
+        SDL_RenderFillRect(renderer, &slot_rect);
+        char label[5];
+        snprintf(label, sizeof label, "[%u]", slot + 1);
+        draw_text(renderer, label, x, y, 2,
+                  exists ? (SDL_Color){255, 240, 180, 255}
+                         : (SDL_Color){150, 160, 165, 255});
+      }
     }
   }
-  if (settings->remapping >= 0) {
-    SDL_Rect modal = {120, 210, 400, 100};
-    SDL_SetRenderDrawColor(renderer, 20, 25, 35, 255);
-    SDL_RenderFillRect(renderer, &modal);
-    char prompt[32];
-    snprintf(prompt, sizeof prompt, "KEY %d OF 8", settings->remapping + 1);
-    draw_text(renderer, prompt, 185, 240, 3,
-              (SDL_Color){255, 240, 180, 255});
-  } else if (settings->path_length) {
-    draw_text(renderer, settings->path, 112, 475, 2,
-              (SDL_Color){180, 230, 210, 255});
-  }
-  if (settings->remapping < 0 && settings->selected == 0)
-    draw_text(renderer, "TYPE PATH THEN ENTER", 112, 475, 2,
-              (SDL_Color){180, 230, 210, 255});
   (void)keys;
 }
 
@@ -244,33 +432,125 @@ static void boot_chime(SDL_AudioDeviceID device) {
   free(samples);
 }
 
-static void draw_button(SDL_Renderer *renderer, SDL_Rect rect, int pressed) {
-  SDL_SetRenderDrawColor(renderer, pressed ? 220 : 70, pressed ? 70 : 70,
-                        pressed ? 70 : 80, 190);
+static void draw_button(SDL_Renderer *renderer, SDL_Rect rect, int pressed,
+                        int highlighted) {
+  SDL_SetRenderDrawColor(renderer,
+                         highlighted ? 210 : pressed ? 220 : 70,
+                         highlighted ? 170 : pressed ? 70 : 70,
+                         highlighted ? 45 : pressed ? 70 : 80, 190);
   SDL_RenderFillRect(renderer, &rect);
-  SDL_SetRenderDrawColor(renderer, 245, 245, 245, 220);
+  SDL_SetRenderDrawColor(renderer, highlighted ? 255 : 245,
+                         highlighted ? 240 : 245, highlighted ? 120 : 245, 220);
   SDL_RenderDrawRect(renderer, &rect);
 }
 
-static void draw_controller(SDL_Renderer *renderer, uint8_t buttons) {
+static void draw_arrow(SDL_Renderer *renderer, int x, int y, int dx, int dy) {
+  int tip_x = x + dx * 8, tip_y = y + dy * 8;
+  SDL_SetRenderDrawColor(renderer, 245, 245, 245, 230);
+  SDL_RenderDrawLine(renderer, x - dx * 8, y - dy * 8, x + dx * 8,
+                     y + dy * 8);
+  SDL_RenderDrawLine(renderer, tip_x, tip_y, tip_x - dx * 4 + dy * 4,
+                     tip_y - dy * 4 - dx * 4);
+  SDL_RenderDrawLine(renderer, tip_x, tip_y, tip_x - dx * 4 - dy * 4,
+                     tip_y - dy * 4 + dx * 4);
+}
+
+static void draw_settings_button(SDL_Renderer *renderer) {
+  SDL_Rect rect = {600, 704, 32, 32};
+  draw_button(renderer, rect, 0, 0);
+  SDL_SetRenderDrawColor(renderer, 245, 245, 245, 230);
+  SDL_RenderDrawRect(renderer, &(SDL_Rect){610, 714, 12, 12});
+  SDL_RenderDrawLine(renderer, 616, 710, 616, 714);
+  SDL_RenderDrawLine(renderer, 616, 726, 616, 730);
+  SDL_RenderDrawLine(renderer, 606, 720, 610, 720);
+  SDL_RenderDrawLine(renderer, 622, 720, 626, 720);
+  SDL_RenderDrawLine(renderer, 609, 713, 612, 716);
+  SDL_RenderDrawLine(renderer, 620, 724, 623, 727);
+  SDL_RenderDrawLine(renderer, 623, 713, 620, 716);
+  SDL_RenderDrawLine(renderer, 612, 724, 609, 727);
+}
+
+static void draw_debug_button(SDL_Renderer *renderer) {
+  SDL_Rect rect = {560, 704, 32, 32};
+  draw_button(renderer, rect, 0, 0);
+  SDL_SetRenderDrawColor(renderer, 245, 245, 245, 230);
+  SDL_RenderDrawRect(renderer, &(SDL_Rect){568, 712, 16, 16});
+  SDL_RenderDrawLine(renderer, 576, 708, 576, 712);
+  SDL_RenderDrawLine(renderer, 576, 728, 576, 732);
+  SDL_RenderDrawLine(renderer, 564, 716, 568, 716);
+  SDL_RenderDrawLine(renderer, 584, 716, 588, 716);
+  SDL_RenderDrawLine(renderer, 564, 724, 568, 724);
+  SDL_RenderDrawLine(renderer, 584, 724, 588, 724);
+  SDL_RenderDrawLine(renderer, 570, 709, 572, 712);
+  SDL_RenderDrawLine(renderer, 582, 709, 580, 712);
+}
+
+static int controller_button_at(int x, int y) {
+  static const SDL_Rect rects[8] = {
+      {96, 656, 32, 32},  {32, 656, 32, 32},  {64, 624, 32, 32},
+      {64, 688, 32, 32},  {576, 608, 40, 40}, {528, 640, 40, 40},
+      {264, 656, 48, 24}, {328, 656, 48, 24},
+  };
+  for (int i = 0; i < 8; i++)
+    if (x >= rects[i].x && x < rects[i].x + rects[i].w &&
+        y >= rects[i].y && y < rects[i].y + rects[i].h)
+      return i;
+  return -1;
+}
+
+static int settings_button_at(int x, int y) {
+  return x >= 600 && x < 632 && y >= 704 && y < 736;
+}
+
+static int debug_button_at(int x, int y) {
+  return x >= 560 && x < 592 && y >= 704 && y < 736;
+}
+
+static void draw_debug_overlay(SDL_Renderer *renderer, const gb_t *gb) {
+  gb_regs_t regs;
+  char line[32];
+  SDL_SetRenderDrawColor(renderer, 8, 12, 20, 230);
+  SDL_RenderFillRect(renderer, &(SDL_Rect){12, 12, 220, 92});
+  gb_dbg_regs(gb, &regs);
+  draw_text(renderer, "DEBUG", 24, 22, 2, (SDL_Color){255, 240, 180, 255});
+  snprintf(line, sizeof line, "PC %04X", regs.pc);
+  draw_text(renderer, line, 24, 48, 2, (SDL_Color){235, 245, 240, 255});
+  snprintf(line, sizeof line, "AF %04X", regs.af);
+  draw_text(renderer, line, 24, 72, 2, (SDL_Color){235, 245, 240, 255});
+  snprintf(line, sizeof line, "HL %04X", regs.hl);
+  draw_text(renderer, line, 120, 72, 2, (SDL_Color){235, 245, 240, 255});
+}
+
+static void draw_controller(SDL_Renderer *renderer, uint8_t buttons,
+                            int remapping) {
   SDL_Rect rect;
   SDL_SetRenderDrawBlendMode(renderer, SDL_BLENDMODE_BLEND);
   rect = (SDL_Rect){64, 624, 32, 32};
-  draw_button(renderer, rect, buttons & (1 << 2));
+  draw_button(renderer, rect, buttons & (1 << 2), remapping == 2);
   rect = (SDL_Rect){64, 688, 32, 32};
-  draw_button(renderer, rect, buttons & (1 << 3));
+  draw_button(renderer, rect, buttons & (1 << 3), remapping == 3);
   rect = (SDL_Rect){32, 656, 32, 32};
-  draw_button(renderer, rect, buttons & (1 << 1));
+  draw_button(renderer, rect, buttons & (1 << 1), remapping == 1);
   rect = (SDL_Rect){96, 656, 32, 32};
-  draw_button(renderer, rect, buttons & (1 << 0));
-  rect = (SDL_Rect){416, 656, 48, 24};
-  draw_button(renderer, rect, buttons & (1 << 6));
-  rect = (SDL_Rect){480, 656, 48, 24};
-  draw_button(renderer, rect, buttons & (1 << 7));
-  rect = (SDL_Rect){528, 608, 40, 40};
-  draw_button(renderer, rect, buttons & (1 << 4));
-  rect = (SDL_Rect){576, 640, 40, 40};
-  draw_button(renderer, rect, buttons & (1 << 5));
+  draw_button(renderer, rect, buttons & (1 << 0), remapping == 0);
+  draw_arrow(renderer, 80, 640, 0, -1);
+  draw_arrow(renderer, 80, 704, 0, 1);
+  draw_arrow(renderer, 48, 672, -1, 0);
+  draw_arrow(renderer, 112, 672, 1, 0);
+  rect = (SDL_Rect){264, 656, 48, 24};
+  draw_button(renderer, rect, buttons & (1 << 6), remapping == 6);
+  rect = (SDL_Rect){328, 656, 48, 24};
+  draw_button(renderer, rect, buttons & (1 << 7), remapping == 7);
+  rect = (SDL_Rect){528, 640, 40, 40};
+  draw_button(renderer, rect, buttons & (1 << 5), remapping == 5);
+  rect = (SDL_Rect){576, 608, 40, 40};
+  draw_button(renderer, rect, buttons & (1 << 4), remapping == 4);
+  draw_text(renderer, "SELECT", 270, 664, 1, (SDL_Color){245, 245, 245, 230});
+  draw_text(renderer, "START", 337, 664, 1, (SDL_Color){245, 245, 245, 230});
+  draw_text(renderer, "B", 543, 657, 2, (SDL_Color){245, 245, 245, 230});
+  draw_text(renderer, "A", 591, 625, 2, (SDL_Color){245, 245, 245, 230});
+  draw_debug_button(renderer);
+  draw_settings_button(renderer);
 }
 
 int main(int argc, char **argv) {
@@ -287,10 +567,12 @@ int main(int argc, char **argv) {
   SDL_Texture *texture = NULL;
   SDL_AudioDeviceID audio_device = 0;
   audio_context_t audio_context = {0, 100};
-  settings_t settings = {0, 0, -1, 0, "", 0};
+  settings_t settings = {0};
+  settings.remapping = -1;
+  settings.state_slot = 0;
   SDL_Keycode keys[8] = {SDLK_RIGHT, SDLK_LEFT, SDLK_UP, SDLK_DOWN,
                          SDLK_z, SDLK_x, SDLK_LSHIFT, SDLK_RETURN};
-  int running = 1, paused = debug;
+  int running = 1, paused = debug, debug_overlay = 0;
   unsigned save_timer = 0;
   uint8_t buttons = 0;
 
@@ -367,7 +649,7 @@ int main(int argc, char **argv) {
   window = SDL_CreateWindow("Game Boy", SDL_WINDOWPOS_CENTERED,
                             SDL_WINDOWPOS_CENTERED, 640, 768, 0);
   renderer = window ? SDL_CreateRenderer(window, -1, SDL_RENDERER_ACCELERATED) : NULL;
-  texture = renderer ? SDL_CreateTexture(renderer, SDL_PIXELFORMAT_ABGR8888,
+  texture = renderer ? SDL_CreateTexture(renderer, SDL_PIXELFORMAT_ARGB8888,
                                          SDL_TEXTUREACCESS_STREAMING, 160, 144)
                      : NULL;
   if (!texture) {
@@ -419,14 +701,47 @@ int main(int argc, char **argv) {
       if (event.type == SDL_QUIT)
         running = 0;
       if (settings.open) {
-        if (event.type == SDL_TEXTINPUT && settings.selected == 0 &&
-            settings.path_length + strlen(event.text.text) < sizeof settings.path) {
-          strcpy(settings.path + settings.path_length, event.text.text);
-          settings.path_length += strlen(event.text.text);
-        }
         if (event.type == SDL_KEYDOWN) {
           SDL_Keycode key = event.key.keysym.sym;
-          if (settings.remapping >= 0 && key != SDLK_ESCAPE) {
+          if (settings.browser) {
+            if (settings.confirm_load) {
+              if (key == SDLK_ESCAPE || key == SDLK_n) {
+                settings.confirm_load = 0;
+              } else if ((key == SDLK_RETURN || key == SDLK_KP_ENTER || key == SDLK_y) &&
+                         settings.rom_count) {
+                size_t new_size;
+                uint8_t *new_rom = read_file(settings.roms[settings.rom_selected].path,
+                                             &new_size);
+                if (new_rom && gb_load_rom(gb, new_rom, new_size) == 0) {
+                  if (snprintf(path, sizeof path, "%s",
+                               settings.roms[settings.rom_selected].path) <
+                          (int)sizeof path &&
+                      snprintf(save_path, sizeof save_path, "%s.sav", path) <
+                          (int)sizeof save_path &&
+                      snprintf(state_path, sizeof state_path, "%s.state", path) <
+                          (int)sizeof state_path) {
+                    free(state);
+                    state_size = gb_save_state_size(gb);
+                    state = malloc(state_size);
+                    settings.open = 0;
+                    settings.browser = 0;
+                    settings.confirm_load = 0;
+                    SDL_StopTextInput();
+                  }
+                }
+                free(new_rom);
+              }
+            } else if (key == SDLK_ESCAPE) {
+              settings.browser = 0;
+            } else if (key == SDLK_UP && settings.rom_selected > 0) {
+              settings.rom_selected--;
+            } else if (key == SDLK_DOWN && settings.rom_selected + 1 < settings.rom_count) {
+              settings.rom_selected++;
+            } else if ((key == SDLK_RETURN || key == SDLK_KP_ENTER) &&
+                       settings.rom_count) {
+              settings.confirm_load = 1;
+            }
+          } else if (settings.remapping >= 0 && key != SDLK_ESCAPE) {
             keys[settings.remapping] = key;
             settings.remapping++;
             if (settings.remapping == 8)
@@ -439,41 +754,46 @@ int main(int argc, char **argv) {
             settings.selected--;
           } else if (key == SDLK_DOWN && settings.selected < 9) {
             settings.selected++;
+          } else if (key == SDLK_LEFT && settings.selected >= 1 && settings.selected <= 4 &&
+                     settings.state_slot > 0) {
+            settings.state_slot--;
+          } else if (key == SDLK_RIGHT && settings.selected >= 1 && settings.selected <= 4 &&
+                     settings.state_slot < 4) {
+            settings.state_slot++;
           } else if (key == SDLK_LEFT && settings.selected == 5 && audio_context.volume >= 10) {
             audio_context.volume -= 10;
           } else if (key == SDLK_RIGHT && settings.selected == 5 && audio_context.volume <= 90) {
             audio_context.volume += 10;
+          } else if (key == SDLK_LEFT && settings.selected == 6) {
+            settings.palette = (settings.palette + 2) % 3;
+          } else if (key == SDLK_RIGHT && settings.selected == 6) {
+            settings.palette = (settings.palette + 1) % 3;
           } else if ((key == SDLK_RETURN || key == SDLK_KP_ENTER) && settings.selected == 0) {
-            size_t new_size;
-            uint8_t *new_rom = read_file(settings.path, &new_size);
-            if (new_rom && gb_load_rom(gb, new_rom, new_size) == 0) {
-              strncpy(path, settings.path, sizeof save_path - 1);
-              path[sizeof save_path - 1] = '\0';
-              if (snprintf(save_path, sizeof save_path, "%s.sav", path) >=
-                      (int)sizeof save_path ||
-                  snprintf(state_path, sizeof state_path, "%s.state", path) >=
-                      (int)sizeof state_path) {
-                free(new_rom);
-                settings.path_length = 0;
-                settings.path[0] = '\0';
-                continue;
-              }
-              free(state);
-              state_size = gb_save_state_size(gb);
-              state = malloc(state_size);
-            }
-            free(new_rom);
-            settings.path_length = 0;
-            settings.path[0] = '\0';
+            settings.browser = 1;
+            settings.rom_selected = 0;
           } else if ((key == SDLK_RETURN || key == SDLK_KP_ENTER) && settings.selected == 1) {
-            save_ram(gb, save_path);
+            char slot_path[4096];
+            if (save_slot_path(save_path, settings.state_slot, slot_path,
+                               sizeof slot_path) == 0)
+              save_ram(gb, slot_path);
           } else if ((key == SDLK_RETURN || key == SDLK_KP_ENTER) && settings.selected == 2) {
-            file = read_file(save_path, &file_size);
+            char slot_path[4096];
+            if (save_slot_path(save_path, settings.state_slot, slot_path,
+                               sizeof slot_path) != 0)
+              continue;
+            file = read_file(slot_path, &file_size);
             if (file) { gb_load_ram(gb, file, file_size); free(file); }
           } else if ((key == SDLK_RETURN || key == SDLK_KP_ENTER) && settings.selected == 3) {
-            save_state(gb, state_path, state, state_size);
+            char slot_path[4096];
+            if (state_slot_path(state_path, settings.state_slot, slot_path,
+                                sizeof slot_path) == 0)
+              save_state(gb, slot_path, state, state_size);
           } else if ((key == SDLK_RETURN || key == SDLK_KP_ENTER) && settings.selected == 4) {
-            file = read_file(state_path, &file_size);
+            char slot_path[4096];
+            if (state_slot_path(state_path, settings.state_slot, slot_path,
+                                sizeof slot_path) != 0)
+              continue;
+            file = read_file(slot_path, &file_size);
             if (file) { if (file_size == state_size) gb_load_state(gb, file, file_size); free(file); }
           } else if ((key == SDLK_RETURN || key == SDLK_KP_ENTER) && settings.selected == 6) {
             settings.palette = (settings.palette + 1) % 3;
@@ -481,20 +801,43 @@ int main(int argc, char **argv) {
             settings.remapping = 0;
           } else if ((key == SDLK_RETURN || key == SDLK_KP_ENTER) && settings.selected == 8) {
             gb_reset(gb);
+            settings.open = 0;
+            SDL_StopTextInput();
           } else if ((key == SDLK_RETURN || key == SDLK_KP_ENTER) && settings.selected == 9) {
             settings.open = 0;
             SDL_StopTextInput();
-          } else if (key == SDLK_BACKSPACE && settings.selected == 0 && settings.path_length) {
-            settings.path[--settings.path_length] = '\0';
           }
         }
         continue;
       }
+      if (event.type == SDL_MOUSEBUTTONDOWN &&
+          event.button.button == SDL_BUTTON_LEFT) {
+        if (settings_button_at(event.button.x, event.button.y)) {
+          open_settings(&settings, debug);
+          SDL_StartTextInput();
+          continue;
+        }
+        if (debug_button_at(event.button.x, event.button.y)) {
+          debug_overlay = !debug_overlay;
+          paused = debug || debug_overlay;
+          continue;
+        }
+        int button = controller_button_at(event.button.x, event.button.y);
+        if (button >= 0) {
+          buttons |= (uint8_t)(1u << button);
+          gb_set_input(gb, buttons);
+        }
+      }
+      if (event.type == SDL_MOUSEBUTTONUP &&
+          event.button.button == SDL_BUTTON_LEFT) {
+        int button = controller_button_at(event.button.x, event.button.y);
+        if (button >= 0) {
+          buttons &= (uint8_t)~(1u << button);
+          gb_set_input(gb, buttons);
+        }
+      }
       if (event.type == SDL_KEYDOWN && event.key.keysym.sym == SDLK_ESCAPE) {
-        settings.open = 1;
-        settings.selected = 0;
-        settings.path_length = 0;
-        settings.path[0] = '\0';
+        open_settings(&settings, debug);
         SDL_StartTextInput();
         continue;
       }
@@ -538,7 +881,7 @@ int main(int argc, char **argv) {
       refresh();
     }
 #endif
-    if (!paused)
+    if (!paused && !settings.open)
       gb_run_frame(gb);
     if (++save_timer == 300) {
       save_ram(gb, save_path);
@@ -555,9 +898,12 @@ int main(int argc, char **argv) {
     SDL_RenderClear(renderer);
     SDL_Rect game_rect = {0, 0, 640, 576};
     SDL_RenderCopy(renderer, texture, NULL, &game_rect);
-    draw_controller(renderer, buttons);
+    if (debug_overlay)
+      draw_debug_overlay(renderer, gb);
+    draw_controller(renderer, buttons, settings.remapping);
     if (settings.open)
-      draw_settings(renderer, &settings, audio_context.volume, keys);
+      draw_settings(renderer, &settings, audio_context.volume, save_path,
+                    state_path, keys);
     SDL_RenderPresent(renderer);
     SDL_Delay(16);
   }
@@ -573,6 +919,7 @@ int main(int argc, char **argv) {
   SDL_DestroyWindow(window);
   SDL_Quit();
   free(state);
+  free_roms(settings.roms, settings.rom_count);
   gb_destroy(gb);
   return 0;
 }
