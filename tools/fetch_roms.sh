@@ -9,6 +9,7 @@ if [ ! -d "$tmp/.git" ]; then rm -rf "$tmp"; git clone --depth 1 "$repo" "$tmp";
 cp -R "$tmp/cpu_instrs" "$out/"
 cp -R "$tmp/instr_timing" "$out/"
 cp -R "$tmp/mem_timing" "$out/"
+cp -R "$tmp/dmg_sound" "$out/"
 
 collection_url=${GB_TEST_COLLECTION_URL:-https://github.com/c-sp/game-boy-test-roms/releases/download/v7.0/game-boy-test-roms-v7.0.zip}
 archive=${TMPDIR:-/tmp}/game-boy-test-roms-v7.0.zip
@@ -19,8 +20,14 @@ unzip -q -o "$archive" 'mooneye-test-suite/acceptance/instr/daa.gb' \
   'mooneye-test-suite/acceptance/timer/div_write.gb' \
   'mooneye-test-suite/acceptance/oam_dma/basic.gb' \
   'mooneye-test-suite/acceptance/ei_sequence.gb' \
+  'same-suite/apu/channel_3/channel_3_stop_delay.gb' \
+  'same-suite/apu/channel_3/channel_3_delay.gb' \
+  'same-suite/apu/channel_3/channel_3_first_sample.gb' \
+  'same-suite/apu/channel_3/channel_3_wave_ram_dac_on_rw.gb' \
   -d "$out/.collection"
 rm -rf "$out/mooneye-test-suite"
 mv "$out/.collection/mooneye-test-suite" "$out/mooneye-test-suite"
+rm -rf "$out/same-suite"
+mv "$out/.collection/same-suite" "$out/same-suite"
 rm -rf "$out/.collection"
 printf '%s\n' "Downloaded Blargg and selected Mooneye ROMs to $out"

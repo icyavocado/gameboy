@@ -57,6 +57,8 @@ static void serial_callback(void *unused, uint8_t out, uint8_t *in) {
 static unsigned audio_calls;
 static size_t audio_frames;
 static int16_t audio_peak;
+static unsigned audio_transitions;
+static int audio_last_sign;
 static void audio_callback(void *unused, const int16_t *stereo, size_t frames) {
   (void)unused;
   audio_calls++;
@@ -64,6 +66,11 @@ static void audio_callback(void *unused, const int16_t *stereo, size_t frames) {
   for (size_t i = 0; i < frames * 2; i++)
     if (stereo[i] > audio_peak)
       audio_peak = stereo[i];
+  for (size_t i = 0; i < frames; i++) {
+    int sign = stereo[i * 2] > 0;
+    if (i || audio_calls > 1) audio_transitions += sign != audio_last_sign;
+    audio_last_sign = sign;
+  }
 }
 
 UTEST(core, immediate_and_register_loads) {
@@ -860,8 +867,8 @@ UTEST(core, apu_wave_and_noise_channels) {
   audio_peak = 0;
   gb_set_audio_callback(g, audio_callback, NULL);
   gb_dbg_write(g, 0xff26, 0x80);
-  gb_dbg_write(g, 0xff30, 0xff);
-  gb_dbg_write(g, 0xff31, 0xff);
+  for (uint16_t a = 0xff30; a <= 0xff3f; a++)
+    gb_dbg_write(g, a, 0xff);
   gb_dbg_write(g, 0xff1a, 0x80);
   gb_dbg_write(g, 0xff1c, 0x20);
   gb_dbg_write(g, 0xff1e, 0x80);
@@ -876,6 +883,28 @@ UTEST(core, apu_wave_and_noise_channels) {
   gb_dbg_write(g, 0xff21, 0xf0);
   gb_dbg_write(g, 0xff23, 0x80);
   ASSERT_TRUE(gb_dbg_read(g, 0xff26) & 8);
+  gb_destroy(g);
+}
+
+UTEST(core, apu_frequency_register_increases_pitch) {
+  gb_t *g = load((const uint8_t[]){0x00}, 1);
+  gb_set_audio_callback(g, audio_callback, NULL);
+  gb_dbg_write(g, 0xff26, 0x80);
+  gb_dbg_write(g, 0xff12, 0xf0);
+  gb_dbg_write(g, 0xff24, 0x77);
+  gb_dbg_write(g, 0xff25, 0x11);
+  gb_dbg_write(g, 0xff13, 0x00);
+  gb_dbg_write(g, 0xff14, 0x80);
+  audio_calls = audio_transitions = 0;
+  audio_last_sign = 0;
+  gb_run_frame(g);
+  unsigned low = audio_transitions;
+  gb_dbg_write(g, 0xff13, 0x00);
+  gb_dbg_write(g, 0xff14, 0xc0);
+  audio_transitions = 0;
+  audio_last_sign = 0;
+  gb_run_frame(g);
+  ASSERT_TRUE(audio_transitions > low);
   gb_destroy(g);
 }
 
@@ -981,6 +1010,7 @@ int main(void) {
   core_save_state_round_trip();
   core_apu_square_channel();
   core_apu_wave_and_noise_channels();
+  core_apu_frequency_register_increases_pitch();
   core_extended_control_and_stack_opcodes();
   core_conditional_relative_and_signed_stack_arithmetic();
   core_oam_dma_transfer();

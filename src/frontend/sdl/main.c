@@ -60,6 +60,73 @@ static void audio(void *user, const int16_t *stereo, size_t frames) {
   SDL_QueueAudio(device, stereo, bytes);
 }
 
+static void draw_boot_logo(SDL_Renderer *renderer, int y) {
+  static const uint8_t logo[48] = {
+      0xce, 0xed, 0x66, 0x66, 0xcc, 0x0d, 0x00, 0x0b,
+      0x03, 0x73, 0x00, 0x83, 0x00, 0x0c, 0x00, 0x0d,
+      0x00, 0x08, 0x11, 0x1f, 0x88, 0x89, 0x00, 0x0e,
+      0xdc, 0xcc, 0x6e, 0xe6, 0xdd, 0xdd, 0xd9, 0x99,
+      0xbb, 0xbb, 0x67, 0x63, 0x6e, 0x0e, 0xec, 0xcc,
+      0xdd, 0xdc, 0x99, 0x9f, 0xbb, 0xb9, 0x33, 0x3e,
+  };
+  uint8_t tile_data[24][8];
+  for (unsigned i = 0; i < sizeof logo; i++) {
+    for (unsigned nibble = 0; nibble < 2; nibble++) {
+      unsigned value = nibble ? logo[i] & 0x0f : logo[i] >> 4;
+      uint8_t expanded = 0;
+      for (unsigned bit = 0; bit < 4; bit++)
+        if (value & (1u << (3 - bit)))
+          expanded |= (uint8_t)(3u << (6 - bit * 2));
+      unsigned tile = i / 2;
+      unsigned row = (i % 2) * 4 + nibble * 2;
+      tile_data[tile][row] = expanded;
+      tile_data[tile][row + 1] = expanded;
+    }
+  }
+  const int scale = 4;
+  const int width = 12 * 8 * scale;
+  const int left = (640 - width) / 2;
+
+  SDL_SetRenderDrawColor(renderer, 224, 248, 208, 255);
+  SDL_RenderClear(renderer);
+  SDL_SetRenderDrawColor(renderer, 15, 56, 15, 255);
+  for (unsigned map_row = 0; map_row < 2; map_row++) {
+    for (unsigned map_column = 0; map_column < 12; map_column++) {
+      unsigned tile = map_row * 12 + map_column;
+      for (unsigned row = 0; row < 8; row++) {
+        for (unsigned bit = 0; bit < 8; bit++) {
+          if (tile_data[tile][row] & (uint8_t)(1u << (7 - bit))) {
+            SDL_Rect pixel = {left + (int)(map_column * 8 + bit) * scale,
+                              y + (int)(map_row * 8 + row) * scale, scale, scale};
+            SDL_RenderFillRect(renderer, &pixel);
+          }
+        }
+      }
+    }
+  }
+  SDL_RenderPresent(renderer);
+}
+
+static void boot_chime(SDL_AudioDeviceID device) {
+  enum { rate = 48000, frames = 14400 };
+  int16_t *samples = malloc(frames * 2 * sizeof *samples);
+  if (!samples)
+    return;
+  uint32_t phase = 0;
+  for (unsigned i = 0; i < frames; i++) {
+    unsigned frequency = i < 7200 ? 1049 : 2080;
+    unsigned amplitude = i < 2400 ? i * 180 / 2400
+                                   : i > 12000 ? (frames - i) * 180 / 2400 : 180;
+    phase += (uint32_t)(((uint64_t)frequency << 32) / rate);
+    int value = (phase & 0x80000000u) ? (int)amplitude : -(int)amplitude;
+    samples[i * 2] = (int16_t)value;
+    samples[i * 2 + 1] = (int16_t)value;
+  }
+  if (device)
+    SDL_QueueAudio(device, samples, frames * 2 * sizeof *samples);
+  free(samples);
+}
+
 static void draw_button(SDL_Renderer *renderer, SDL_Rect rect, int pressed) {
   SDL_SetRenderDrawColor(renderer, pressed ? 220 : 70, pressed ? 70 : 70,
                         pressed ? 70 : 80, 190);
@@ -90,11 +157,12 @@ static void draw_controller(SDL_Renderer *renderer, uint8_t buttons) {
 }
 
 int main(int argc, char **argv) {
-  int debug = argc == 3 && strcmp(argv[1], "--debug") == 0;
-  const char *path = debug ? argv[2] : argc == 2 ? argv[1] : NULL;
+  int debug = 0;
+  const char *path = NULL, *boot_path = NULL;
   char save_path[4096], state_path[4096];
-  size_t rom_size, file_size;
+  size_t rom_size, file_size, boot_size = 0;
   uint8_t *rom = NULL, *file = NULL, *state = NULL;
+  uint8_t *boot = NULL;
   gb_t *gb = NULL;
   SDL_Window *window = NULL;
   SDL_Renderer *renderer = NULL;
@@ -104,19 +172,48 @@ int main(int argc, char **argv) {
   unsigned save_timer = 0;
   uint8_t buttons = 0;
 
+  for (int i = 1; i < argc; i++) {
+    if (strcmp(argv[i], "--debug") == 0) {
+      debug = 1;
+    } else if (strcmp(argv[i], "--boot-rom") == 0 && i + 1 < argc) {
+      boot_path = argv[++i];
+    } else if (!path) {
+      path = argv[i];
+    } else {
+      path = NULL;
+      break;
+    }
+  }
   if (!path) {
-    fprintf(stderr, "usage: %s [--debug] ROM\n", argv[0]);
+    fprintf(stderr, "usage: %s [--debug] [--boot-rom FILE] ROM\n", argv[0]);
     return 2;
   }
+  if (boot_path) {
+    boot = read_file(boot_path, &boot_size);
+    if (!boot) {
+      fprintf(stderr, "cannot read boot ROM: %s\n", boot_path);
+      return 1;
+    }
+    if (boot_size != 0x100 && boot_size != 0x900) {
+      fprintf(stderr, "boot ROM must be 256 or 2304 bytes\n");
+      free(boot);
+      return 1;
+    }
+  }
   rom = read_file(path, &rom_size);
-  if (!rom)
+  if (!rom) {
+    free(boot);
     return 1;
+  }
   gb = gb_create();
-  if (!gb || gb_load_rom(gb, rom, rom_size)) {
+  if (!gb || (boot && gb_load_boot_rom(gb, boot, boot_size)) ||
+      gb_load_rom(gb, rom, rom_size)) {
+    free(boot);
     free(rom);
     gb_destroy(gb);
     return 1;
   }
+  free(boot);
   free(rom);
   if (snprintf(save_path, sizeof save_path, "%s.sav", path) >=
           (int)sizeof save_path ||
@@ -167,6 +264,21 @@ int main(int argc, char **argv) {
   if (audio_device) {
     gb_set_audio_callback(gb, audio, &audio_device);
     SDL_PauseAudioDevice(audio_device, 0);
+  }
+  if (gb_rom_logo_valid(gb)) {
+    Uint32 boot_start = SDL_GetTicks();
+    while (running && SDL_GetTicks() - boot_start < 5000) {
+      SDL_Event event;
+      while (SDL_PollEvent(&event))
+        if (event.type == SDL_QUIT)
+          running = 0;
+      Uint32 elapsed = SDL_GetTicks() - boot_start;
+      int y = -32 + (int)((elapsed < 1500 ? elapsed * 304 / 1500 : 304));
+      draw_boot_logo(renderer, y);
+      SDL_Delay(16);
+    }
+    if (running)
+      boot_chime(audio_device);
   }
 #ifdef GB_ENABLE_TUI
   if (debug) {

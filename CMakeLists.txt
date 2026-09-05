@@ -56,6 +56,10 @@ add_test(NAME blargg COMMAND sh ${CMAKE_CURRENT_SOURCE_DIR}/tests/run_blargg.sh
   $<TARGET_FILE:gb-headless>)
 add_test(NAME mooneye COMMAND sh ${CMAKE_CURRENT_SOURCE_DIR}/tests/run_mooneye.sh
   $<TARGET_FILE:gb-headless>)
+add_test(NAME same_suite COMMAND sh ${CMAKE_CURRENT_SOURCE_DIR}/tests/run_same_suite.sh
+  $<TARGET_FILE:gb-headless>)
+add_test(NAME sound COMMAND sh ${CMAKE_CURRENT_SOURCE_DIR}/tests/run_sound.sh
+  $<TARGET_FILE:gb-headless>)
 
 if(EMSCRIPTEN)
   add_executable(gb-wasm src/frontend/wasm/main.c)

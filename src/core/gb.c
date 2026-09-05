@@ -4,7 +4,7 @@
 #include <string.h>
 
 /* Invalid SM83 opcodes are intentionally treated as NOPs in Phase 1. */
-#define STATE_VERSION 9u
+#define STATE_VERSION 11u
 #define STATE_HEADER_SIZE 24u
 #define MAX_BREAKPOINTS 16u
 #define RTC_SAVE_SIZE 24u
@@ -39,7 +39,13 @@ struct gb {
   uint32_t rtc_cycles;
   uint32_t audio_remainder;
   uint32_t audio_phase[4];
+  uint32_t audio_host_phase[4];
+  int32_t audio_filter[2];
   uint16_t noise_lfsr;
+  uint16_t audio_seq_cycles, audio_sweep_shadow, audio_wave_delay;
+  uint16_t audio_length[4];
+  uint8_t audio_seq_step, audio_volume[4], audio_envelope_timer[4],
+      audio_sweep_timer, audio_sweep_enabled, audio_sweep_negate;
   uint8_t audio_enabled[4];
   gb_model_t model;
   gb_serial_cb serial;
@@ -112,37 +118,140 @@ static uint8_t audio_read(const gb_t *g, uint16_t a) {
                      (g->audio_enabled[3] ? 8 : 0));
   if (a >= 0xff30 && a <= 0xff3f)
     return g->mem[a];
+  if ((a == 0xff76 || a == 0xff77) && g->model == GB_MODEL_CGB) {
+    uint8_t pcm[4] = {0};
+    for (unsigned channel = 0; channel < 4; channel++) {
+      uint16_t base = channel == 0 ? 0xff10 : channel == 1 ? 0xff16 :
+                      channel == 2 ? 0xff1a : 0xff20;
+      if (channel < 2) {
+        static const uint8_t duty[] = {0x01, 0x81, 0x87, 0x7e};
+        unsigned bit = (g->audio_phase[channel] >> 29) & 7;
+        pcm[channel] = (duty[g->mem[base] >> 6] & (1u << bit))
+                           ? g->audio_volume[channel] : 0;
+      } else if (channel == 2) {
+        if (g->audio_wave_delay)
+          continue;
+        if (!(g->mem[0xff1a] & 0x80))
+          continue;
+        unsigned index = (g->audio_phase[2] >> 16) & 31;
+        uint8_t sample = (uint8_t)((g->mem[0xff30 + index / 2] >>
+                                    (index & 1 ? 0 : 4)) & 15);
+        unsigned shift = g->mem[base + 2] >> 5;
+        pcm[channel] = shift == 0 ? 0 : (uint8_t)(sample >> (shift - 1));
+      } else {
+        pcm[channel] = !(g->noise_lfsr & 1) ? g->audio_volume[channel] : 0;
+      }
+    }
+    return (uint8_t)(a == 0xff76 ? pcm[1] << 4 | pcm[0]
+                                  : pcm[3] << 4 | pcm[2]);
+  }
   return g->mem[a];
 }
 static void audio_trigger(gb_t *g, unsigned channel) {
-  static const uint16_t base[] = {0xff10, 0xff16, 0xff1a, 0xff20};
-  g->audio_enabled[channel] = (uint8_t)((g->mem[base[channel] +
-                                                   (channel == 2 ? 0 : channel == 3 ? 1 : 2)] &
-                                         (channel == 2 ? 0x80 : 0xf8)) != 0);
+  static const uint16_t dac_reg[] = {0xff12, 0xff17, 0xff1a, 0xff21};
+  static const uint16_t length_reg[] = {0xff11, 0xff16, 0xff1b, 0xff20};
+  static const uint16_t volume_reg[] = {0xff12, 0xff17, 0xff1c, 0xff21};
+  g->audio_enabled[channel] = (uint8_t)((g->mem[dac_reg[channel]] &
+                                          (channel == 2 ? 0x80 : 0xf8)) != 0);
   g->audio_phase[channel] = 0;
+  g->audio_host_phase[channel] = 0;
+  if (channel == 2) {
+    g->audio_length[2] = (uint16_t)(256 - g->mem[length_reg[2]]);
+    g->audio_wave_delay = (uint16_t)(2 * (2048 -
+        (((g->mem[0xff1e] & 7) << 8) | g->mem[0xff1d])));
+    g->audio_wave_delay = (uint16_t)(g->audio_wave_delay + 6);
+  } else {
+    g->audio_length[channel] =
+        (uint16_t)(64 - (g->mem[length_reg[channel]] & 0x3f));
+  }
+  if (channel == 2)
+    g->audio_volume[2] = (uint8_t)((g->mem[0xff1c] >> 5) & 3);
+  if (channel == 3) {
+    g->audio_volume[3] = g->mem[0xff21] >> 4;
+    g->audio_envelope_timer[3] = (uint8_t)(g->mem[0xff21] & 15);
+    if (!g->audio_envelope_timer[3]) g->audio_envelope_timer[3] = 8;
+  } else if (channel != 2) {
+    g->audio_volume[channel] = g->mem[volume_reg[channel]] >> 4;
+    g->audio_envelope_timer[channel] = g->mem[volume_reg[channel]] & 15;
+    if (!g->audio_envelope_timer[channel]) g->audio_envelope_timer[channel] = 8;
+  }
+  if (channel == 0) {
+    g->audio_sweep_shadow = (uint16_t)((g->mem[0xff14] & 7) << 8 |
+                                       g->mem[0xff13]);
+    g->audio_sweep_timer = g->mem[0xff10] >> 4 & 7;
+    if (!g->audio_sweep_timer) g->audio_sweep_timer = 8;
+    g->audio_sweep_enabled = (uint8_t)((g->mem[0xff10] & 0x77) != 0);
+    g->audio_sweep_negate = (uint8_t)((g->mem[0xff10] >> 3) & 1);
+  }
   if (channel == 3)
     g->noise_lfsr = 0x7fff;
   g->mem[0xff26] |= (uint8_t)(1u << channel);
 }
 static int16_t audio_sample(gb_t *g, unsigned channel) {
   static const uint8_t duty[] = {0x01, 0x81, 0x87, 0x7e};
-  uint16_t base = channel ? (channel == 1 ? 0xff16 : channel == 2 ? 0xff1a : 0xff20)
-                          : 0xff10;
-  uint8_t control = g->mem[base + 2];
+  static const uint16_t volume_reg[] = {0xff12, 0xff17, 0xff1c, 0xff21};
+  static const uint16_t freq_low[] = {0xff13, 0xff18, 0xff1d, 0};
+  static const uint16_t freq_high[] = {0xff14, 0xff19, 0xff1e, 0};
+  static const uint16_t duty_reg[] = {0xff11, 0xff16, 0, 0};
+  uint8_t control = g->mem[volume_reg[channel]];
   if (channel == 2) {
-    uint16_t frequency = (uint16_t)((g->mem[base + 4] & 7) << 8 | g->mem[base + 3]);
-    uint32_t step = (uint32_t)(((uint64_t)(2048 - frequency) * 65536u) / AUDIO_RATE);
-    unsigned index = (g->audio_phase[2] >> 16) & 31;
+    unsigned index = (g->audio_host_phase[2] >> 16) & 31;
     uint8_t volume = (control >> 5) & 3;
     uint8_t sample = (g->mem[0xff30 + index / 2] >> (index & 1 ? 0 : 4)) & 15;
-    g->audio_phase[2] += step;
+    uint16_t frequency = (uint16_t)((g->mem[freq_high[channel]] & 7) << 8 |
+                                    g->mem[freq_low[channel]]);
+    if (frequency < 2048)
+      g->audio_host_phase[2] +=
+          (uint32_t)((((uint64_t)AUDIO_CLOCK * 65536u) /
+                      (32u * (2048u - frequency))) /
+                     AUDIO_RATE);
     if (!volume) return 0;
     if (volume == 1) return (int16_t)(((int)sample - 8) * 128);
     if (volume == 2) return (int16_t)(((int)sample - 8) * 64);
     return (int16_t)(((int)sample - 8) * 32);
   }
   if (channel == 3) {
-    control = g->mem[base + 1];
+    control = g->mem[volume_reg[channel]];
+    if (!(control >> 4))
+      return 0;
+    return (int16_t)((control >> 4) * (!(g->noise_lfsr & 1) ? 512 : -512));
+  }
+  uint8_t volume = g->audio_volume[channel], duty_index = g->mem[duty_reg[channel]] >> 6;
+  uint16_t frequency = (uint16_t)((g->mem[freq_high[channel]] & 7) << 8 |
+                                  g->mem[freq_low[channel]]);
+  uint32_t step = frequency < 2048
+                      ? (uint32_t)((((uint64_t)131072u << 32) /
+                                    (2048u - frequency)) /
+                                   AUDIO_RATE)
+                      : 0;
+  unsigned bit = (g->audio_host_phase[channel] >> 29) & 7;
+  g->audio_host_phase[channel] += step;
+  return (int16_t)((duty[duty_index] & (1u << bit) ? volume : -volume) * 512);
+}
+static void audio_tick(gb_t *g) {
+  static const uint16_t freq_low[] = {0xff13, 0xff18, 0xff1d};
+  static const uint16_t freq_high[] = {0xff14, 0xff19, 0xff1e};
+  for (unsigned channel = 0; channel < 3; channel++) {
+    if (!g->audio_enabled[channel])
+      continue;
+    uint16_t frequency = (uint16_t)((g->mem[freq_high[channel]] & 7) << 8 |
+                                    g->mem[freq_low[channel]]);
+    unsigned denominator = 2048u - frequency;
+    if (!denominator)
+      continue;
+    if (channel == 2) {
+      if (g->audio_wave_delay) {
+        if (--g->audio_wave_delay == 0)
+          g->audio_phase[channel] = 0x10000;
+      } else {
+        g->audio_phase[channel] += (uint32_t)(0x8000u / denominator);
+      }
+    } else {
+      g->audio_phase[channel] += (uint32_t)(0x8000000u / denominator);
+    }
+  }
+  if (g->audio_enabled[3]) {
+    uint16_t base = 0xff20;
     uint8_t divisor = g->mem[base] & 7, shift = g->mem[base] >> 4;
     unsigned period = (divisor ? divisor * 16u : 8u) << shift;
     g->audio_phase[3]++;
@@ -152,15 +261,7 @@ static int16_t audio_sample(gb_t *g, unsigned channel) {
       if (g->mem[base] & 8)
         g->noise_lfsr = (uint16_t)((g->noise_lfsr & ~(1u << 6)) | (bit << 6));
     }
-    return (control >> 4) && !(g->noise_lfsr & 1) ? (int16_t)((control >> 4) * 512) : 0;
   }
-  uint8_t volume = control >> 4, duty_index = g->mem[base] >> 6;
-  uint16_t frequency = (uint16_t)((g->mem[base + 4] & 7) << 8 | g->mem[base + 3]);
-  uint16_t hz = (uint16_t)((2048 - frequency) * 131072u / 2048u);
-  uint32_t step = hz ? (uint32_t)(((uint64_t)hz << 32) / AUDIO_RATE) : 0;
-  unsigned bit = (g->audio_phase[channel] >> 29) & 7;
-  g->audio_phase[channel] += step;
-  return (int16_t)((duty[duty_index] & (1u << bit) ? volume : 0) * 512);
 }
 static void audio_frame(gb_t *g) {
   unsigned frames;
@@ -180,11 +281,79 @@ static void audio_frame(gb_t *g) {
       if (routing & (uint8_t)(1u << (channel + 4))) samples[i * 2] += value[channel];
       if (routing & (uint8_t)(1u << channel)) samples[i * 2 + 1] += value[channel];
     }
-    samples[i * 2] = (int16_t)(samples[i * 2] * left / 8);
-    samples[i * 2 + 1] = (int16_t)(samples[i * 2 + 1] * right / 8);
+    int left_sample = samples[i * 2] * left / 8;
+    int right_sample = samples[i * 2 + 1] * right / 8;
+    g->audio_filter[0] += (left_sample - g->audio_filter[0]) / 4;
+    g->audio_filter[1] += (right_sample - g->audio_filter[1]) / 4;
+    left_sample = g->audio_filter[0];
+    right_sample = g->audio_filter[1];
+    if (left_sample > 32767) left_sample = 32767;
+    if (left_sample < -32768) left_sample = -32768;
+    if (right_sample > 32767) right_sample = 32767;
+    if (right_sample < -32768) right_sample = -32768;
+    samples[i * 2] = (int16_t)left_sample;
+    samples[i * 2 + 1] = (int16_t)right_sample;
   }
   if (g->audio && (g->mem[0xff26] & 0x80))
     g->audio(g->audio_user, samples, frames);
+}
+static void audio_sweep(gb_t *g) {
+  uint8_t nr10 = g->mem[0xff10];
+  int delta = g->audio_sweep_shadow >> (nr10 & 7);
+  int next = g->audio_sweep_negate ? (int)g->audio_sweep_shadow - delta
+                                   : (int)g->audio_sweep_shadow + delta;
+  if (next > 2047 || next < 0) {
+    g->audio_enabled[0] = 0;
+    g->mem[0xff26] &= (uint8_t)~1;
+    return;
+  }
+  g->audio_sweep_shadow = (uint16_t)next;
+  g->mem[0xff13] = (uint8_t)next;
+  g->mem[0xff14] = (uint8_t)((g->mem[0xff14] & 0xf8) | (next >> 8));
+}
+static void audio_sequence(gb_t *g) {
+  static const uint16_t length_reg[] = {0xff11, 0xff16, 0xff1b, 0xff20};
+  unsigned step = g->audio_seq_step;
+  if (!(step & 1)) {
+    for (unsigned i = 0; i < 4; i++) {
+      if (g->audio_length[i] && !(g->mem[length_reg[i] + 3] & 0x40))
+        continue;
+      if (g->audio_length[i] && --g->audio_length[i] == 0) {
+        g->audio_enabled[i] = 0;
+        g->mem[0xff26] &= (uint8_t)~(1u << i);
+      }
+    }
+  }
+  if (step == 2 || step == 6) {
+    if (g->audio_sweep_timer && --g->audio_sweep_timer == 0) {
+      audio_sweep(g);
+      g->audio_sweep_timer = (g->mem[0xff10] >> 4) & 7;
+      if (!g->audio_sweep_timer) g->audio_sweep_timer = 8;
+    }
+  }
+  if (step == 7) {
+    for (unsigned i = 0; i < 4; i++) {
+      uint16_t base = i == 0 ? 0xff10 : i == 1 ? 0xff16 :
+                      i == 2 ? 0xff1a : 0xff20;
+      uint8_t control = g->mem[base + (i == 3 ? 1 : 2)];
+      uint8_t timer = g->audio_envelope_timer[i];
+      uint8_t period = (uint8_t)(control & 7);
+      if (!period)
+        period = 8;
+      if (timer && --timer == 0) {
+        uint8_t volume = g->audio_volume[i];
+        if (control & 8) {
+          if (volume < 15) volume++;
+        } else if (volume) {
+          volume--;
+        }
+        g->audio_volume[i] = volume;
+         timer = period;
+      }
+      g->audio_envelope_timer[i] = timer;
+    }
+  }
+  g->audio_seq_step = (uint8_t)((step + 1) & 7);
 }
 static unsigned timer_bit(const gb_t *g) {
   static const unsigned bits[] = {9, 3, 5, 7};
@@ -397,7 +566,7 @@ static uint8_t rd(const gb_t *g, uint16_t a) {
                              g->mbc == 5 ? g->ram_bank : 0) *
                     0x2000 + a - 0xa000) % g->ram_size];
   }
-  if (a >= 0xff10 && a <= 0xff26)
+  if ((a >= 0xff10 && a <= 0xff26) || a == 0xff76 || a == 0xff77)
     return audio_read(g, a);
   if (a == 0xff68 || a == 0xff6a)
     return g->mem[a];
@@ -600,12 +769,17 @@ static void wr(gb_t *g, uint16_t a, uint8_t v) {
     g->mem[a] = (uint8_t)(v & 0x80);
     if (!(v & 0x80)) {
       memset(g->mem + 0xff10, 0, 0x17);
-      g->audio_enabled[0] = g->audio_enabled[1] = 0;
+      memset(g->audio_enabled, 0, sizeof g->audio_enabled);
+      memset(g->audio_volume, 0, sizeof g->audio_volume);
     }
     return;
   }
   if (a >= 0xff10 && a <= 0xff25) {
     g->mem[a] = v;
+    if (a == 0xff1a && !(v & 0x80)) {
+      g->audio_enabled[2] = 0;
+      g->mem[0xff26] &= (uint8_t)~4;
+    }
     if ((a == 0xff14 || a == 0xff19 || a == 0xff1e || a == 0xff23) &&
         (v & 0x80))
       audio_trigger(g, a == 0xff14 ? 0 : a == 0xff19 ? 1 : a == 0xff1e ? 2 : 3);
@@ -617,11 +791,14 @@ static void wr(gb_t *g, uint16_t a, uint8_t v) {
   }
   if (a == 0xff04) {
     unsigned old_signal = g->timer_signal;
+    unsigned old_audio_signal = (g->divider >> 12) & 1;
     g->mem[a] = 0;
     g->divider = 0;
     g->div = 0;
     g->timer = 0;
     g->timer_signal = 0;
+    if (old_audio_signal)
+      audio_sequence(g);
     if (old_signal && !timer_level(g)) {
       if (++g->mem[0xff05] == 0) {
         g->mem[0xff05] = g->mem[0xff06];
@@ -931,16 +1108,20 @@ static void ppu_tick(gb_t *g) {
 }
 static void tick(gb_t *g, unsigned n) {
   while (n--) {
+    audio_tick(g);
     if (g->mbc == 3 && ++g->rtc_cycles == 4194304u) {
       g->rtc_cycles = 0;
       rtc_second(g);
     }
+    unsigned old_audio_signal = (g->divider >> 12) & 1;
     unsigned old = timer_level(g);
     g->divider++;
     g->div = (uint8_t)(g->divider >> 8);
     g->mem[0xff04] = g->div;
     unsigned now = timer_level(g);
     g->timer_signal = (uint8_t)now;
+    if (old_audio_signal && !((g->divider >> 12) & 1))
+      audio_sequence(g);
     if (old && !now) {
       if (++g->mem[0xff05] == 0) {
         g->mem[0xff05] = g->mem[0xff06];
@@ -1468,7 +1649,7 @@ int gb_load_ram(gb_t *g, const uint8_t *data, size_t n) {
 }
 size_t gb_save_state_size(const gb_t *g) {
   return g ? STATE_HEADER_SIZE + 0x10000u + sizeof g->vram + sizeof g->wram +
-                         0xa0u + sizeof g->fb + sizeof g->bg_line + 235u + g->ram_size
+                          0xa0u + sizeof g->fb + sizeof g->bg_line + 285u + g->ram_size
            : 0;
 }
 size_t gb_save_state(const gb_t *g, uint8_t *out) {
@@ -1550,10 +1731,22 @@ size_t gb_save_state(const gb_t *g, uint8_t *out) {
   *p++ = g->bg_palette_index;
   *p++ = g->obj_palette_index;
   put16(&p, g->noise_lfsr);
+  put16(&p, g->audio_seq_cycles);
+  put16(&p, g->audio_sweep_shadow);
+  put16(&p, g->audio_wave_delay);
+  for (unsigned i = 0; i < 4; i++) put16(&p, g->audio_length[i]);
+  *p++ = g->audio_seq_step;
+  for (unsigned i = 0; i < 4; i++) *p++ = g->audio_volume[i];
+  for (unsigned i = 0; i < 4; i++) *p++ = g->audio_envelope_timer[i];
+  *p++ = g->audio_sweep_timer;
+  *p++ = g->audio_sweep_enabled;
+  *p++ = g->audio_sweep_negate;
   for (unsigned i = 0; i < 4; i++) {
     put32(&p, g->audio_phase[i]);
     *p++ = g->audio_enabled[i];
   }
+  for (unsigned i = 0; i < 4; i++) put32(&p, g->audio_host_phase[i]);
+  for (unsigned i = 0; i < 2; i++) put32(&p, (uint32_t)g->audio_filter[i]);
   if (g->ram_size)
     memcpy(p, g->ram, g->ram_size);
   return gb_save_state_size(g);
@@ -1635,10 +1828,22 @@ int gb_load_state(gb_t *g, const uint8_t *data, size_t n) {
   g->bg_palette_index = *p++;
   g->obj_palette_index = *p++;
   g->noise_lfsr = get16(&p);
+  g->audio_seq_cycles = get16(&p);
+  g->audio_sweep_shadow = get16(&p);
+  g->audio_wave_delay = get16(&p);
+  for (unsigned i = 0; i < 4; i++) g->audio_length[i] = get16(&p);
+  g->audio_seq_step = *p++;
+  for (unsigned i = 0; i < 4; i++) g->audio_volume[i] = *p++;
+  for (unsigned i = 0; i < 4; i++) g->audio_envelope_timer[i] = *p++;
+  g->audio_sweep_timer = *p++;
+  g->audio_sweep_enabled = *p++;
+  g->audio_sweep_negate = *p++;
   for (unsigned i = 0; i < 4; i++) {
     g->audio_phase[i] = get32(&p);
     g->audio_enabled[i] = *p++;
   }
+  for (unsigned i = 0; i < 4; i++) g->audio_host_phase[i] = get32(&p);
+  for (unsigned i = 0; i < 2; i++) g->audio_filter[i] = (int32_t)get32(&p);
   if (g->ram_size)
     memcpy(g->ram, p, g->ram_size);
   return 0;
@@ -1698,6 +1903,18 @@ void gb_reset(gb_t *g) {
   memset(g->mem + 0xff10, 0, 0x17);
   g->mem[0xff26] = 0;
   memset(g->audio_phase, 0, sizeof g->audio_phase);
+  memset(g->audio_host_phase, 0, sizeof g->audio_host_phase);
+  memset(g->audio_filter, 0, sizeof g->audio_filter);
+  memset(g->audio_length, 0, sizeof g->audio_length);
+  memset(g->audio_volume, 0, sizeof g->audio_volume);
+  memset(g->audio_envelope_timer, 0, sizeof g->audio_envelope_timer);
+  g->audio_seq_cycles = 0;
+  g->audio_wave_delay = 0;
+  g->audio_seq_step = 0;
+  g->audio_sweep_shadow = 0;
+  g->audio_sweep_timer = 0;
+  g->audio_sweep_enabled = 0;
+  g->audio_sweep_negate = 0;
   g->noise_lfsr = 0x7fff;
   memset(g->audio_enabled, 0, sizeof g->audio_enabled);
 }
