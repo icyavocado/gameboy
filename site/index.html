@@ -28,6 +28,7 @@
   #settings label { display: inline-block; width: 130px; }
   #keymap button { min-width: 110px; margin: 2px; }
   #gamepad { display: none; width: min(92vw, 360px); margin: 18px auto; }
+  #gamepad.visible { display: block; }
   .pad-row { display: flex; justify-content: space-between; align-items: center; margin: 8px 0; }
   .pad-cluster { display: flex; align-items: center; gap: 6px; }
   .dpad { display: grid; grid-template-columns: repeat(3, 52px); grid-template-rows: repeat(3, 52px); gap: 2px; }
@@ -44,7 +45,6 @@
   .pad-button.action { border-radius: 50%; width: 62px; height: 62px; }
   .pad-button:active, .pad-button.held { background: #5c987f; }
   @media (orientation: portrait) and (max-width: 700px) {
-    #gamepad.visible { display: block; }
     #screen { width: min(94vw, 480px); }
     #settings { width: min(92vw, 560px); }
     .card { width: min(92vw, 640px); }
