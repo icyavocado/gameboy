@@ -84,9 +84,9 @@ one-liner, not a code change.
    verified `gb_reset` never touches cartridge RAM).
 3. P1-1 extract `config.c`/`config.h`. DONE (types + parse/serialize/paths/persist
    moved out of `sdl/main.c`; `gb-sdl` target updated).
-   P1-2 centralize mutation+persist. DEFERRED: the 12 call sites share identical
-   arguments, but a wrapper saves little until the failure indicator needs richer
-   handling; revisit on the next settings touch.
+   P1-2 centralize mutation+persist. DONE: the 17 call sites now set
+   `settings.dirty`, flushed once per settings key event in `sdl/main.c`
+   (single `persist_config` call; immediate-write behavior preserved).
 4. P2 invalid-opcode trap + SPEC note. DONE (stderr diagnostic in debug builds only;
    SPEC save-state wording corrected to field-wise serialization).
 5. Full build + `core|input|gameplay` (+ Blargg/Mooneye/SameSuite/sound as time allows),

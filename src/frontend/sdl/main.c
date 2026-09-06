@@ -784,8 +784,7 @@ int main(int argc, char **argv) {
                                  config_path, sizeof config_path);
                     load_config(config_path, path, sizeof path, &settings,
                                 &audio_context.volume, keys, 0);
-                    persist_config(main_config_path, config_path, path, &settings,
-                                   audio_context.volume, keys);
+                    settings.dirty = 1;
                     save_timer = autosave_timer = 0;
                     settings.open = 0;
                     settings.browser = 0;
@@ -814,8 +813,7 @@ int main(int argc, char **argv) {
             settings.remapping++;
             if (settings.remapping == 8)
               settings.remapping = -1;
-            persist_config(main_config_path, config_path, path, &settings,
-                           audio_context.volume, keys);
+            settings.dirty = 1;
           } else if (settings.confirm_action) {
             if (key == SDLK_ESCAPE || key == SDLK_n) {
               settings.confirm_action = 0;
@@ -857,53 +855,41 @@ int main(int argc, char **argv) {
           } else if (key == SDLK_LEFT && settings.selected == 1 &&
                      settings.save_slot > 0) {
             settings.save_slot--;
-            persist_config(main_config_path, config_path, path, &settings,
-                           audio_context.volume, keys);
+            settings.dirty = 1;
           } else if (key == SDLK_RIGHT && settings.selected == 1 &&
                      settings.save_slot < 4) {
             settings.save_slot++;
-            persist_config(main_config_path, config_path, path, &settings,
-                           audio_context.volume, keys);
+            settings.dirty = 1;
           } else if (key == SDLK_LEFT && settings.selected >= 2 && settings.selected <= 3) {
             settings.state_slot = settings.state_slot == 0 ? 5 : settings.state_slot - 1;
-            persist_config(main_config_path, config_path, path, &settings,
-                           audio_context.volume, keys);
+            settings.dirty = 1;
           } else if (key == SDLK_RIGHT && settings.selected >= 2 && settings.selected <= 3) {
             settings.state_slot = settings.state_slot == 5 ? 0 : settings.state_slot + 1;
-            persist_config(main_config_path, config_path, path, &settings,
-                           audio_context.volume, keys);
+            settings.dirty = 1;
           } else if (key == SDLK_LEFT && settings.selected == 4 && audio_context.volume >= 10) {
             audio_context.volume -= 10;
-            persist_config(main_config_path, config_path, path, &settings,
-                           audio_context.volume, keys);
+            settings.dirty = 1;
           } else if (key == SDLK_RIGHT && settings.selected == 4 && audio_context.volume <= 90) {
             audio_context.volume += 10;
-            persist_config(main_config_path, config_path, path, &settings,
-                           audio_context.volume, keys);
+            settings.dirty = 1;
           } else if (key == SDLK_LEFT && settings.selected == 5) {
             settings.palette = (settings.palette + 2) % 3;
-            persist_config(main_config_path, config_path, path, &settings,
-                           audio_context.volume, keys);
+            settings.dirty = 1;
           } else if (key == SDLK_RIGHT && settings.selected == 5) {
             settings.palette = (settings.palette + 1) % 3;
-            persist_config(main_config_path, config_path, path, &settings,
-                           audio_context.volume, keys);
+            settings.dirty = 1;
           } else if (key == SDLK_LEFT && settings.selected == 6 && settings.speed > 0) {
             settings.speed--;
-            persist_config(main_config_path, config_path, path, &settings,
-                           audio_context.volume, keys);
+            settings.dirty = 1;
           } else if (key == SDLK_RIGHT && settings.selected == 6 && settings.speed < 4) {
             settings.speed++;
-            persist_config(main_config_path, config_path, path, &settings,
-                           audio_context.volume, keys);
+            settings.dirty = 1;
           } else if (key == SDLK_LEFT && settings.selected == 7 && settings.autosave > 0) {
             settings.autosave--;
-            persist_config(main_config_path, config_path, path, &settings,
-                           audio_context.volume, keys);
+            settings.dirty = 1;
           } else if (key == SDLK_RIGHT && settings.selected == 7 && settings.autosave < 6) {
             settings.autosave++;
-            persist_config(main_config_path, config_path, path, &settings,
-                           audio_context.volume, keys);
+            settings.dirty = 1;
           } else if ((key == SDLK_RETURN || key == SDLK_KP_ENTER) && settings.selected == 0) {
             settings.browser = 1;
             settings.rom_selected = 0;
@@ -915,16 +901,13 @@ int main(int argc, char **argv) {
             settings.confirm_action = 3;
           } else if ((key == SDLK_RETURN || key == SDLK_KP_ENTER) && settings.selected == 5) {
             settings.palette = (settings.palette + 1) % 3;
-            persist_config(main_config_path, config_path, path, &settings,
-                           audio_context.volume, keys);
+            settings.dirty = 1;
           } else if ((key == SDLK_RETURN || key == SDLK_KP_ENTER) && settings.selected == 6) {
             settings.speed = (settings.speed + 1) % 5;
-            persist_config(main_config_path, config_path, path, &settings,
-                           audio_context.volume, keys);
+            settings.dirty = 1;
           } else if ((key == SDLK_RETURN || key == SDLK_KP_ENTER) && settings.selected == 7) {
             settings.autosave = (settings.autosave + 1) % 7;
-            persist_config(main_config_path, config_path, path, &settings,
-                           audio_context.volume, keys);
+            settings.dirty = 1;
           } else if ((key == SDLK_RETURN || key == SDLK_KP_ENTER) && settings.selected == 8) {
             settings.remapping = 0;
           } else if ((key == SDLK_RETURN || key == SDLK_KP_ENTER) && settings.selected == 9) {
@@ -936,6 +919,11 @@ int main(int argc, char **argv) {
             SDL_StopTextInput();
           } else if ((key == SDLK_RETURN || key == SDLK_KP_ENTER) && settings.selected == 11) {
             running = 0;
+          }
+          if (settings.dirty) {
+            settings.dirty = 0;
+            persist_config(main_config_path, config_path, path, &settings,
+                           audio_context.volume, keys);
           }
         }
         continue;
