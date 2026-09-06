@@ -143,6 +143,12 @@ static void draw_text(SDL_Renderer *renderer, const char *text, int x, int y,
   }
 }
 
+static void draw_text_right(SDL_Renderer *renderer, const char *text, int right,
+                            int y, int scale, SDL_Color color) {
+  draw_text(renderer, text, right - (int)strlen(text) * 6 * scale, y, scale,
+            color);
+}
+
 static uint8_t mapped_button(SDL_Keycode key, const SDL_Keycode keys[8]) {
   for (unsigned i = 0; i < 8; i++)
     if (keys[i] == key)
@@ -350,16 +356,17 @@ static void draw_settings(SDL_Renderer *renderer, const settings_t *settings,
     } else if (i == 5) {
       static const char *const palettes[] = {"NONE", "GREEN", "SEPIA"};
       const char *value = palettes[settings->palette];
-      draw_text(renderer, value, 455, y, 2, (SDL_Color){180, 230, 210, 255});
+      draw_text_right(renderer, value, 528, y, 2,
+                      (SDL_Color){180, 230, 210, 255});
     } else if (i == 6) {
       static const char *const speeds[] = {"OFF", "2X", "3X"};
-      draw_text(renderer, speeds[settings->speed], 455, y, 2,
-                (SDL_Color){180, 230, 210, 255});
+      draw_text_right(renderer, speeds[settings->speed], 528, y, 2,
+                      (SDL_Color){180, 230, 210, 255});
     } else if (i == 7) {
       static const char *const autosaves[] = {"OFF", "5S", "10S", "30S",
                                               "1M", "5M", "30M"};
-      draw_text(renderer, autosaves[settings->autosave], 455, y, 2,
-                (SDL_Color){180, 230, 210, 255});
+      draw_text_right(renderer, autosaves[settings->autosave], 528, y, 2,
+                      (SDL_Color){180, 230, 210, 255});
     } else if (i >= 1 && i <= 3) {
       unsigned slot_count = i == 1 ? 5 : 6;
       unsigned selected_slot = i == 1 ? settings->save_slot : settings->state_slot;
@@ -498,21 +505,21 @@ static void draw_arrow(SDL_Renderer *renderer, int x, int y, unsigned direction)
 }
 
 static void draw_settings_button(SDL_Renderer *renderer) {
-  SDL_Rect rect = {600, 704, 32, 32};
+  SDL_Rect rect = {576, 704, 32, 32};
   draw_button(renderer, rect, 0, 0);
-  draw_ui_icon(renderer, ui_assets.cog, 616, 720, 2);
+  draw_ui_icon(renderer, ui_assets.cog, 592, 720, 2);
 }
 
 static void draw_debug_button(SDL_Renderer *renderer) {
-  SDL_Rect rect = {560, 704, 32, 32};
+  SDL_Rect rect = {536, 704, 32, 32};
   draw_button(renderer, rect, 0, 0);
-  draw_ui_icon(renderer, ui_assets.bug, 576, 720, 2);
+  draw_ui_icon(renderer, ui_assets.bug, 552, 720, 2);
 }
 
 static int controller_button_at(int x, int y) {
   static const SDL_Rect rects[8] = {
       {96, 656, 32, 32},  {32, 656, 32, 32},  {64, 624, 32, 32},
-      {64, 688, 32, 32},  {576, 608, 40, 40}, {528, 640, 40, 40},
+      {64, 688, 32, 32},  {568, 608, 40, 40}, {520, 640, 40, 40},
       {264, 656, 48, 24}, {328, 656, 48, 24},
   };
   for (int i = 0; i < 8; i++)
@@ -523,11 +530,11 @@ static int controller_button_at(int x, int y) {
 }
 
 static int settings_button_at(int x, int y) {
-  return x >= 600 && x < 632 && y >= 704 && y < 736;
+  return x >= 576 && x < 608 && y >= 704 && y < 736;
 }
 
 static int debug_button_at(int x, int y) {
-  return x >= 560 && x < 592 && y >= 704 && y < 736;
+  return x >= 536 && x < 568 && y >= 704 && y < 736;
 }
 
 static void draw_debug_overlay(SDL_Renderer *renderer, const gb_t *gb) {
@@ -565,14 +572,14 @@ static void draw_controller(SDL_Renderer *renderer, uint8_t buttons,
   draw_button(renderer, rect, buttons & (1 << 6), remapping == 6);
   rect = (SDL_Rect){328, 656, 48, 24};
   draw_button(renderer, rect, buttons & (1 << 7), remapping == 7);
-  rect = (SDL_Rect){528, 640, 40, 40};
+  rect = (SDL_Rect){520, 640, 40, 40};
   draw_button(renderer, rect, buttons & (1 << 5), remapping == 5);
-  rect = (SDL_Rect){576, 608, 40, 40};
+  rect = (SDL_Rect){568, 608, 40, 40};
   draw_button(renderer, rect, buttons & (1 << 4), remapping == 4);
   draw_text(renderer, "SELECT", 270, 664, 1, (SDL_Color){245, 245, 245, 230});
   draw_text(renderer, "START", 337, 664, 1, (SDL_Color){245, 245, 245, 230});
-  draw_text(renderer, "B", 543, 657, 2, (SDL_Color){245, 245, 245, 230});
-  draw_text(renderer, "A", 591, 625, 2, (SDL_Color){245, 245, 245, 230});
+  draw_text(renderer, "B", 535, 657, 2, (SDL_Color){245, 245, 245, 230});
+  draw_text(renderer, "A", 583, 625, 2, (SDL_Color){245, 245, 245, 230});
   draw_debug_button(renderer);
   draw_settings_button(renderer);
 }
