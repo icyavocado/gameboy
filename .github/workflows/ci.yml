@@ -15,3 +15,38 @@ jobs:
         run: cmake --build build --parallel
       - name: Test
         run: ctest --test-dir build --output-on-failure
+
+  pages:
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Setup Emscripten
+        uses: mymindstorm/setup-emsdk@v14
+        with:
+          version: latest
+      - name: Configure WASM
+        run: emcmake cmake -S . -B build-wasm -DGB_ENABLE_TUI=OFF
+      - name: Build WASM website
+        run: cmake --build build-wasm --parallel
+      - name: Prepare Pages artifact
+        run: |
+          mkdir -p _site
+          cp build-wasm/gb-wasm.html _site/index.html
+          cp build-wasm/app.js _site/app.js
+      - name: Configure Pages
+        uses: actions/configure-pages@v5
+      - name: Upload Pages artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: _site
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4
