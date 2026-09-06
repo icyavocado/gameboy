@@ -7,12 +7,18 @@
 <style>
   body { background: #12141c; color: #e8f0ea; font-family: monospace; text-align: center; }
   #screen { image-rendering: pixelated; width: min(90vw, 640px); background: #000; }
-  .row { margin: 8px; }
+  .row { margin: 12px auto; }
   button, input, select { font-family: monospace; }
   button { background: #26333d; color: #e8f0ea; border: 1px solid #638276;
     border-radius: 3px; padding: 6px 10px; cursor: pointer; }
   button:hover { background: #345248; }
   .toolbar { display: flex; justify-content: center; gap: 6px; flex-wrap: wrap; }
+  .card { width: min(90vw, 640px); box-sizing: border-box; margin: 12px auto;
+    padding: 14px 16px; border: 1px solid #334b47; background: #19242b;
+    text-align: left; border-radius: 4px; }
+  .card h2 { margin: 0 0 8px; color: #b8e6c8; font-size: 1rem; }
+  .card p { margin: 5px 0; color: #aabcb7; }
+  .actions { display: flex; flex-wrap: wrap; gap: 6px; }
   #status { min-height: 1.2em; color: #b8e6c8; }
   kbd { border: 1px solid #555; padding: 0 4px; }
   #settings { display: none; text-align: left; width: min(90vw, 560px); box-sizing: border-box;
@@ -21,24 +27,73 @@
   #settings .srow { margin: 4px 0; }
   #settings label { display: inline-block; width: 130px; }
   #keymap button { min-width: 110px; margin: 2px; }
+  #gamepad { display: none; width: min(92vw, 360px); margin: 18px auto; }
+  .pad-row { display: flex; justify-content: space-between; align-items: center; margin: 8px 0; }
+  .pad-cluster { display: flex; align-items: center; gap: 6px; }
+  .pad-button { width: 64px; height: 52px; padding: 0; font-size: 1.1rem;
+    border-radius: 8px; touch-action: none; user-select: none; }
+  .pad-button.action { border-radius: 50%; width: 62px; height: 62px; }
+  .pad-button:active, .pad-button.held { background: #5c987f; }
+  @media (orientation: portrait) and (max-width: 700px) {
+    #gamepad { display: block; }
+    #screen { width: min(94vw, 480px); }
+    #settings { width: min(92vw, 560px); }
+    .card { width: min(92vw, 640px); }
+  }
 </style>
 </head>
 <body>
 <h1>Game Boy Emulator</h1>
 <div class="row"><canvas id="screen" width="160" height="144"></canvas></div>
-<div class="row toolbar">
-  <input type="file" id="rom" accept=".gb,.gbc">
-  <button id="pause">Pause</button>
-  <button id="reset">Reset</button>
-  <button id="savestate">Save state</button>
-  <button id="loadstate">Load state</button>
-  <button id="settings-toggle" type="button">Settings</button>
+<div id="gamepad" aria-label="Game Boy controls">
+  <div class="pad-row">
+    <div class="pad-cluster">
+      <button class="pad-button" data-bit="4" aria-label="Up">&#9650;</button>
+      <button class="pad-button" data-bit="8" aria-label="Down">&#9660;</button>
+      <button class="pad-button" data-bit="2" aria-label="Left">&#9664;</button>
+      <button class="pad-button" data-bit="1" aria-label="Right">&#9654;</button>
+    </div>
+    <div class="pad-cluster">
+      <button class="pad-button action" data-bit="32" aria-label="B">B</button>
+      <button class="pad-button action" data-bit="16" aria-label="A">A</button>
+    </div>
+  </div>
+  <div class="pad-row">
+    <div class="pad-cluster">
+      <button class="pad-button" data-bit="64" aria-label="Select">Select</button>
+      <button class="pad-button" data-bit="128" aria-label="Start">Start</button>
+    </div>
+  </div>
+</div>
+<div class="card">
+  <h2>Game</h2>
+  <div class="actions">
+    <input type="file" id="rom" accept=".gb,.gbc">
+    <button id="pause">Pause</button>
+    <button id="reset">Reset</button>
+    <button id="settings-toggle" type="button">Settings</button>
+  </div>
+</div>
+<div class="card">
+  <h2>Save State</h2>
+  <p>Quick local state for this browser.</p>
+  <div class="actions">
+    <button id="savestate">Save State</button>
+    <button id="loadstate">Load State</button>
+    <button id="download-state">Download State</button>
+    <button id="import-state">Import State</button>
+    <input id="state-file" type="file" accept=".state,.bin" hidden>
+  </div>
 </div>
 <div id="settings" aria-hidden="true">
-  <strong>Settings</strong>
+  <h2>Settings</h2>
   <div class="srow"><label for="volume">Volume</label><input id="volume" type="range" min="0" max="100" value="100"><span id="volume-value">100%</span></div>
   <div class="srow"><label for="palette">Palette</label><select id="palette"><option value="none">None</option><option value="green">Green</option><option value="sepia">Sepia</option></select></div>
   <div class="srow"><label for="speed">Speed</label><select id="speed"><option value="1">1x</option><option value="2">2x</option><option value="3">3x</option><option value="4">4x</option><option value="5">5x</option></select></div>
+  <div class="srow"><label for="save-slot">Save Slot</label><select id="save-slot"><option value="A">A</option><option value="1">1</option><option value="2">2</option><option value="3">3</option><option value="4">4</option><option value="5">5</option></select></div>
+  <div class="srow"><label for="auto-save">Auto Save</label><select id="auto-save"><option value="0">Off</option><option value="5">Every 5s</option><option value="10">Every 10s</option><option value="30">Every 30s</option><option value="60">Every 1m</option></select></div>
+  <div class="srow"><label>Save data</label><button id="save-slot-now">Save Slot</button> <button id="load-slot">Load Save</button></div>
+  <div class="srow"><label>Battery data</label><button id="download-save">Download Save</button> <button id="import-save">Import Save</button><input id="save-file" type="file" accept=".sav" hidden></div>
   <div class="srow"><label>Remap keys</label><span id="keymap"></span></div>
 </div>
 <div id="status">Pick a .gb ROM to start.</div>
