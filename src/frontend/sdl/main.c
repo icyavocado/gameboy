@@ -2,6 +2,7 @@
 #include "input.h"
 #include "ui_assets.h"
 #include <SDL.h>
+#include <ctype.h>
 #include <dirent.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -290,6 +291,145 @@ static const char *setting_names[] = {
     "LOAD ROM", "SAVE SLOT", "SAVE STATE", "LOAD STATE", "VOLUME",
     "CHANGE PALETTE", "SPEED", "AUTO SAVE", "REMAP KEYS", "RESET", "CLOSE",
     "QUIT"};
+
+static const char *const autosave_names[] = {"OFF", "5s", "10s", "30s",
+                                             "1m", "5m", "30m"};
+
+static const struct {
+  const char *name;
+  SDL_Keycode key;
+} config_keys[] = {
+    {"SDLK_RIGHT", SDLK_RIGHT}, {"SDLK_LEFT", SDLK_LEFT},
+    {"SDLK_UP", SDLK_UP},       {"SDLK_DOWN", SDLK_DOWN},
+    {"SDLK_z", SDLK_z},         {"SDLK_x", SDLK_x},
+    {"SDLK_LSHIFT", SDLK_LSHIFT}, {"SDLK_RSHIFT", SDLK_RSHIFT},
+    {"SDLK_RETURN", SDLK_RETURN}, {"SDLK_KP_ENTER", SDLK_KP_ENTER},
+    {"SDLK_SPACE", SDLK_SPACE}, {"SDLK_a", SDLK_a},
+    {"SDLK_b", SDLK_b},
+};
+
+static char *trim_config(char *text) {
+  char *end;
+  while (isspace((unsigned char)*text)) text++;
+  end = text + strlen(text);
+  while (end > text && isspace((unsigned char)end[-1])) *--end = '\0';
+  return text;
+}
+
+static SDL_Keycode config_key(const char *name) {
+  for (size_t i = 0; i < sizeof config_keys / sizeof *config_keys; i++)
+    if (strcasecmp(name, config_keys[i].name) == 0) return config_keys[i].key;
+  return SDLK_UNKNOWN;
+}
+
+static const char *config_key_name(SDL_Keycode key) {
+  for (size_t i = 0; i < sizeof config_keys / sizeof *config_keys; i++)
+    if (key == config_keys[i].key) return config_keys[i].name;
+  return "SDLK_UNKNOWN";
+}
+
+static int config_autosave(const char *value) {
+  for (int i = 0; i < 7; i++)
+    if (strcasecmp(value, autosave_names[i]) == 0) return i;
+  return -1;
+}
+
+static int config_speed(const char *value) {
+  if (strcasecmp(value, "OFF") == 0 || strcmp(value, "1") == 0 ||
+      strcasecmp(value, "1x") == 0) return 0;
+  if (strcmp(value, "2") == 0 || strcasecmp(value, "2x") == 0) return 1;
+  if (strcmp(value, "3") == 0 || strcasecmp(value, "3x") == 0) return 2;
+  return -1;
+}
+
+static void load_config(const char *filename, char *rom_path, size_t path_size,
+                        settings_t *settings, unsigned *volume,
+                        SDL_Keycode keys[8], int allow_rom) {
+  FILE *file = fopen(filename, "r");
+  char line[4096];
+  if (!file) return;
+  while (fgets(line, sizeof line, file)) {
+    char *text = trim_config(line);
+    char *value = strchr(text, ' ');
+    if (!*text || *text == '#') continue;
+    if (!value) continue;
+    *value++ = '\0';
+    value = trim_config(value);
+    if (strcasecmp(text, "LOADROM") == 0 && allow_rom) {
+      snprintf(rom_path, path_size, "%s", value);
+    } else if (strcasecmp(text, "SAVESLOT") == 0) {
+      int slot = atoi(value);
+      if (slot >= 1 && slot <= 5) settings->save_slot = (unsigned)slot - 1;
+    } else if (strcasecmp(text, "STATE") == 0) {
+      if (strcasecmp(value, "A") == 0) settings->state_slot = 5;
+      else {
+        int slot = atoi(value);
+        if (slot >= 1 && slot <= 5) settings->state_slot = (unsigned)slot - 1;
+      }
+    } else if (strcasecmp(text, "VOLUME") == 0) {
+      int level = atoi(value);
+      if (level >= 0 && level <= 100) *volume = (unsigned)level;
+    } else if (strcasecmp(text, "PALETTE") == 0) {
+      int palette = atoi(value);
+      if (palette >= 0 && palette <= 2) settings->palette = palette;
+    } else if (strcasecmp(text, "SPEED") == 0) {
+      int speed = config_speed(value);
+      if (speed >= 0) settings->speed = speed;
+    } else if (strcasecmp(text, "AUTOSAVE") == 0) {
+      int autosave = config_autosave(value);
+      if (autosave >= 0) settings->autosave = autosave;
+    } else if (strcasecmp(text, "REMAPKEYS") == 0) {
+      char *token = strtok(value, " \t");
+      for (unsigned i = 0; i < 8 && token; i++) {
+        SDL_Keycode key = config_key(token);
+        if (key != SDLK_UNKNOWN) keys[i] = key;
+        token = strtok(NULL, " \t");
+      }
+    }
+  }
+  fclose(file);
+}
+
+static const char *state_config_value(const settings_t *settings) {
+  static const char *const slots[] = {"1", "2", "3", "4", "5"};
+  return settings->state_slot == 5 ? "A" : slots[settings->state_slot];
+}
+
+static int write_config(const char *filename, const char *rom_path,
+                        int include_rom, const settings_t *settings,
+                        unsigned volume, const SDL_Keycode keys[8]) {
+  FILE *file = fopen(filename, "w");
+  if (!file) return -1;
+  if (include_rom) fprintf(file, "LOADROM %s\n", rom_path);
+  fprintf(file, "SAVESLOT %u\nSTATE %s\nVOLUME %u\nPALETTE %d\n",
+          settings->save_slot + 1, state_config_value(settings), volume,
+          settings->palette);
+  fprintf(file, "SPEED %s\nAUTOSAVE %s\nREMAPKEYS",
+          settings->speed == 0 ? "1x" : settings->speed == 1 ? "2x" : "3x",
+          autosave_names[settings->autosave]);
+  for (unsigned i = 0; i < 8; i++)
+    fprintf(file, " %s", config_key_name(keys[i]));
+  fprintf(file, "\n");
+  return fclose(file) == 0 ? 0 : -1;
+}
+
+static void config_paths(const char *rom_path, char *main_path, size_t main_size,
+                         char *specific_path, size_t specific_size) {
+  const char *slash = strrchr(rom_path, '/');
+  if (slash)
+    snprintf(main_path, main_size, "%.*s/gameboy.cfg", (int)(slash - rom_path),
+             rom_path);
+  else
+    snprintf(main_path, main_size, "gameboy.cfg");
+  snprintf(specific_path, specific_size, "%s.cfg", rom_path);
+}
+
+static void persist_config(const char *main_path, const char *specific_path,
+                           const char *rom_path, const settings_t *settings,
+                           unsigned volume, const SDL_Keycode keys[8]) {
+  write_config(main_path, rom_path, 1, settings, volume, keys);
+  write_config(specific_path, rom_path, 0, settings, volume, keys);
+}
 
 static void draw_settings(SDL_Renderer *renderer, const settings_t *settings,
                           unsigned volume, const char *save_path,
@@ -599,6 +739,7 @@ int main(int argc, char **argv) {
   char path[4096] = "";
   const char *boot_path = NULL;
   char save_path[4096], state_path[4096];
+  char main_config_path[4096], config_path[4096];
   size_t rom_size, file_size, boot_size = 0;
   uint8_t *rom = NULL, *file = NULL, *state = NULL;
   uint8_t *boot = NULL;
@@ -630,10 +771,21 @@ int main(int argc, char **argv) {
       break;
     }
   }
+  if (path[0])
+    config_paths(path, main_config_path, sizeof main_config_path,
+                 config_path, sizeof config_path);
+  else
+    snprintf(main_config_path, sizeof main_config_path, "gameboy.cfg");
+  load_config(main_config_path, path, sizeof path, &settings,
+              &audio_context.volume, keys, 1);
   if (!path[0]) {
     fprintf(stderr, "usage: %s [--debug] [--boot-rom FILE] ROM\n", argv[0]);
     return 2;
   }
+  config_paths(path, main_config_path, sizeof main_config_path,
+               config_path, sizeof config_path);
+  load_config(config_path, path, sizeof path, &settings,
+              &audio_context.volume, keys, 0);
   if (boot_path) {
     boot = read_file(boot_path, &boot_size);
     if (!boot) {
@@ -669,18 +821,24 @@ int main(int argc, char **argv) {
     return 1;
   }
 
-  file = read_file(save_path, &file_size);
-  if (file) {
-    gb_load_ram(gb, file, file_size);
-    free(file);
+  {
+    char slot_path[4096];
+    if (save_slot_path(save_path, settings.save_slot, slot_path,
+                       sizeof slot_path) == 0)
+      load_ram(gb, slot_path);
   }
   size_t state_size = gb_save_state_size(gb);
   state = malloc(state_size);
-  file = read_file(state_path, &file_size);
-  if (file) {
-    if (file_size == state_size)
-      gb_load_state(gb, file, file_size);
-    free(file);
+  {
+    char slot_path[4096];
+    if (state_slot_path(state_path, settings.state_slot, slot_path,
+                        sizeof slot_path) == 0) {
+      file = read_file(slot_path, &file_size);
+      if (file) {
+        if (file_size == state_size) gb_load_state(gb, file, file_size);
+        free(file);
+      }
+    }
   }
   if (SDL_Init(SDL_INIT_VIDEO | SDL_INIT_EVENTS | SDL_INIT_AUDIO)) {
     free(state);
@@ -771,6 +929,12 @@ int main(int argc, char **argv) {
                     state_size = gb_save_state_size(gb);
                     state = malloc(state_size);
                     load_ram(gb, save_path);
+                    config_paths(path, main_config_path, sizeof main_config_path,
+                                 config_path, sizeof config_path);
+                    load_config(config_path, path, sizeof path, &settings,
+                                &audio_context.volume, keys, 0);
+                    persist_config(main_config_path, config_path, path, &settings,
+                                   audio_context.volume, keys);
                     save_timer = autosave_timer = 0;
                     settings.open = 0;
                     settings.browser = 0;
@@ -799,6 +963,8 @@ int main(int argc, char **argv) {
             settings.remapping++;
             if (settings.remapping == 8)
               settings.remapping = -1;
+            persist_config(main_config_path, config_path, path, &settings,
+                           audio_context.volume, keys);
           } else if (settings.confirm_action) {
             if (key == SDLK_ESCAPE || key == SDLK_n) {
               settings.confirm_action = 0;
@@ -840,29 +1006,53 @@ int main(int argc, char **argv) {
           } else if (key == SDLK_LEFT && settings.selected == 1 &&
                      settings.save_slot > 0) {
             settings.save_slot--;
+            persist_config(main_config_path, config_path, path, &settings,
+                           audio_context.volume, keys);
           } else if (key == SDLK_RIGHT && settings.selected == 1 &&
                      settings.save_slot < 4) {
             settings.save_slot++;
+            persist_config(main_config_path, config_path, path, &settings,
+                           audio_context.volume, keys);
           } else if (key == SDLK_LEFT && settings.selected >= 2 && settings.selected <= 3) {
             settings.state_slot = settings.state_slot == 0 ? 5 : settings.state_slot - 1;
+            persist_config(main_config_path, config_path, path, &settings,
+                           audio_context.volume, keys);
           } else if (key == SDLK_RIGHT && settings.selected >= 2 && settings.selected <= 3) {
             settings.state_slot = settings.state_slot == 5 ? 0 : settings.state_slot + 1;
+            persist_config(main_config_path, config_path, path, &settings,
+                           audio_context.volume, keys);
           } else if (key == SDLK_LEFT && settings.selected == 4 && audio_context.volume >= 10) {
             audio_context.volume -= 10;
+            persist_config(main_config_path, config_path, path, &settings,
+                           audio_context.volume, keys);
           } else if (key == SDLK_RIGHT && settings.selected == 4 && audio_context.volume <= 90) {
             audio_context.volume += 10;
+            persist_config(main_config_path, config_path, path, &settings,
+                           audio_context.volume, keys);
           } else if (key == SDLK_LEFT && settings.selected == 5) {
             settings.palette = (settings.palette + 2) % 3;
+            persist_config(main_config_path, config_path, path, &settings,
+                           audio_context.volume, keys);
           } else if (key == SDLK_RIGHT && settings.selected == 5) {
             settings.palette = (settings.palette + 1) % 3;
+            persist_config(main_config_path, config_path, path, &settings,
+                           audio_context.volume, keys);
           } else if (key == SDLK_LEFT && settings.selected == 6 && settings.speed > 0) {
             settings.speed--;
+            persist_config(main_config_path, config_path, path, &settings,
+                           audio_context.volume, keys);
           } else if (key == SDLK_RIGHT && settings.selected == 6 && settings.speed < 2) {
             settings.speed++;
+            persist_config(main_config_path, config_path, path, &settings,
+                           audio_context.volume, keys);
           } else if (key == SDLK_LEFT && settings.selected == 7 && settings.autosave > 0) {
             settings.autosave--;
+            persist_config(main_config_path, config_path, path, &settings,
+                           audio_context.volume, keys);
           } else if (key == SDLK_RIGHT && settings.selected == 7 && settings.autosave < 6) {
             settings.autosave++;
+            persist_config(main_config_path, config_path, path, &settings,
+                           audio_context.volume, keys);
           } else if ((key == SDLK_RETURN || key == SDLK_KP_ENTER) && settings.selected == 0) {
             settings.browser = 1;
             settings.rom_selected = 0;
@@ -874,10 +1064,16 @@ int main(int argc, char **argv) {
             settings.confirm_action = 3;
           } else if ((key == SDLK_RETURN || key == SDLK_KP_ENTER) && settings.selected == 5) {
             settings.palette = (settings.palette + 1) % 3;
+            persist_config(main_config_path, config_path, path, &settings,
+                           audio_context.volume, keys);
           } else if ((key == SDLK_RETURN || key == SDLK_KP_ENTER) && settings.selected == 6) {
             settings.speed = (settings.speed + 1) % 3;
+            persist_config(main_config_path, config_path, path, &settings,
+                           audio_context.volume, keys);
           } else if ((key == SDLK_RETURN || key == SDLK_KP_ENTER) && settings.selected == 7) {
             settings.autosave = (settings.autosave + 1) % 7;
+            persist_config(main_config_path, config_path, path, &settings,
+                           audio_context.volume, keys);
           } else if ((key == SDLK_RETURN || key == SDLK_KP_ENTER) && settings.selected == 8) {
             settings.remapping = 0;
           } else if ((key == SDLK_RETURN || key == SDLK_KP_ENTER) && settings.selected == 9) {
@@ -934,14 +1130,21 @@ int main(int argc, char **argv) {
           gb_set_input(gb, buttons);
         }
       }
-      if (event.type == SDL_KEYDOWN && event.key.keysym.sym == SDLK_F5)
-        save_state(gb, state_path, state, state_size);
+      if (event.type == SDL_KEYDOWN && event.key.keysym.sym == SDLK_F5) {
+        char slot_path[4096];
+        if (state_slot_path(state_path, settings.state_slot, slot_path,
+                            sizeof slot_path) == 0)
+          save_state(gb, slot_path, state, state_size);
+      }
       if (event.type == SDL_KEYDOWN && event.key.keysym.sym == SDLK_F8) {
-        file = read_file(state_path, &file_size);
-        if (file) {
-          if (file_size == state_size)
-            gb_load_state(gb, file, file_size);
-          free(file);
+        char slot_path[4096];
+        if (state_slot_path(state_path, settings.state_slot, slot_path,
+                            sizeof slot_path) == 0) {
+          file = read_file(slot_path, &file_size);
+          if (file) {
+            if (file_size == state_size) gb_load_state(gb, file, file_size);
+            free(file);
+          }
         }
       }
     }
