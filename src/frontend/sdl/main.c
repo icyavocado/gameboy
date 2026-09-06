@@ -881,17 +881,24 @@ int main(int argc, char **argv) {
   }
   if (gb_rom_logo_valid(gb)) {
     Uint32 boot_start = SDL_GetTicks();
-    while (running && SDL_GetTicks() - boot_start < 5000) {
+    int skip_boot = 0;
+    while (running && !skip_boot && SDL_GetTicks() - boot_start < 5000) {
       SDL_Event event;
-      while (SDL_PollEvent(&event))
-        if (event.type == SDL_QUIT)
+      while (SDL_PollEvent(&event)) {
+        if (event.type == SDL_QUIT) {
           running = 0;
+        } else if (event.type == SDL_KEYDOWN ||
+                   event.type == SDL_MOUSEBUTTONDOWN ||
+                   event.type == SDL_CONTROLLERBUTTONDOWN) {
+          skip_boot = 1;
+        }
+      }
       Uint32 elapsed = SDL_GetTicks() - boot_start;
       int y = -32 + (int)((elapsed < 1500 ? elapsed * 304 / 1500 : 304));
       draw_boot_logo(renderer, y);
       SDL_Delay(16);
     }
-    if (running)
+    if (running && !skip_boot)
       boot_chime(audio_device);
   }
 #ifdef GB_ENABLE_TUI
