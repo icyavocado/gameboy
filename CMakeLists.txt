@@ -9,6 +9,40 @@ add_library(gb STATIC src/core/gb.c src/core/opcodes.c)
 target_include_directories(gb PUBLIC src/core)
 target_compile_options(gb PRIVATE -Wall -Wextra -Werror)
 
+if(EMSCRIPTEN)
+  # Web build: core library plus the browser bindings. SDL, ncurses and the
+  # native test runners are desktop-only.
+  add_executable(gb-wasm src/frontend/wasm/main.c)
+  target_link_libraries(gb-wasm PRIVATE gb)
+  target_compile_options(gb-wasm PRIVATE -Wall -Wextra -Werror)
+  target_link_options(gb-wasm PRIVATE
+    "-sWASM=1"
+    "-sSINGLE_FILE=1"
+    "-sALLOW_MEMORY_GROWTH=1"
+    "-sNO_EXIT_RUNTIME=1"
+    "-sEXPORTED_RUNTIME_METHODS=['ccall','cwrap','HEAPU8','HEAP16','HEAPU32']"
+    "-sEXPORTED_FUNCTIONS=['_main','_wasm_boot','_wasm_free','_wasm_load','_wasm_logo_valid','_wasm_run_frame','_wasm_framebuffer','_wasm_set_input','_wasm_save_size','_wasm_save','_wasm_load_save','_wasm_state_size','_wasm_state_save','_wasm_state_load','_wasm_reset','_wasm_audio_available','_wasm_audio_ptr','_wasm_audio_consume','_malloc','_free']"
+    "--shell-file=${CMAKE_CURRENT_SOURCE_DIR}/site/index.html")
+  set_target_properties(gb-wasm PROPERTIES SUFFIX ".html")
+  add_custom_command(TARGET gb-wasm POST_BUILD
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different
+      ${CMAKE_CURRENT_SOURCE_DIR}/site/app.js $<TARGET_FILE_DIR:gb-wasm>/app.js)
+  # Node-targeted twin of the same bindings for automated smoke testing.
+  add_executable(gb-wasm-node src/frontend/wasm/main.c)
+  target_link_libraries(gb-wasm-node PRIVATE gb)
+  target_compile_options(gb-wasm-node PRIVATE -Wall -Wextra -Werror)
+  target_link_options(gb-wasm-node PRIVATE
+    "-sWASM=1"
+    "-sSINGLE_FILE=1"
+    "-sENVIRONMENT=node"
+    "-sMODULARIZE=1"
+    "-sEXPORT_NAME=createGameBoy"
+    "-sNO_EXIT_RUNTIME=1"
+    "-sEXPORTED_RUNTIME_METHODS=['ccall','cwrap','HEAPU8','HEAP16','HEAPU32']"
+    "-sEXPORTED_FUNCTIONS=['_main','_wasm_boot','_wasm_free','_wasm_load','_wasm_logo_valid','_wasm_run_frame','_wasm_framebuffer','_wasm_set_input','_wasm_save_size','_wasm_save','_wasm_load_save','_wasm_state_size','_wasm_state_save','_wasm_state_load','_wasm_reset','_wasm_audio_available','_wasm_audio_ptr','_wasm_audio_consume','_malloc','_free']")
+  return()
+endif()
+
 add_executable(gb-headless src/frontend/headless/main.c)
 target_link_libraries(gb-headless PRIVATE gb)
 target_compile_options(gb-headless PRIVATE -Wall -Wextra -Werror)
@@ -63,11 +97,6 @@ add_test(NAME same_suite COMMAND sh ${CMAKE_CURRENT_SOURCE_DIR}/tests/run_same_s
 add_test(NAME sound COMMAND sh ${CMAKE_CURRENT_SOURCE_DIR}/tests/run_sound.sh
   $<TARGET_FILE:gb-headless>)
 
-if(EMSCRIPTEN)
-  add_executable(gb-wasm src/frontend/wasm/main.c)
-  target_link_libraries(gb-wasm PRIVATE gb)
-else()
-  add_custom_target(gb-wasm
-    COMMAND ${CMAKE_COMMAND} -E echo "Emscripten required: emcmake cmake -S . -B build-wasm"
-    COMMENT "WASM target unavailable in this toolchain")
-endif()
+add_custom_target(gb-wasm
+  COMMAND ${CMAKE_COMMAND} -E echo "Emscripten required: emcmake cmake -S . -B build-wasm"
+  COMMENT "WASM target unavailable in this toolchain")

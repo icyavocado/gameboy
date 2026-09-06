@@ -1,0 +1,54 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Game Boy Emulator (WASM)</title>
+<style>
+  body { background: #12141c; color: #e8f0ea; font-family: monospace; text-align: center; }
+  #screen { image-rendering: pixelated; width: min(90vw, 640px); background: #000; }
+  .row { margin: 8px; }
+  button, input, select { font-family: monospace; }
+  button { background: #26333d; color: #e8f0ea; border: 1px solid #638276;
+    border-radius: 3px; padding: 6px 10px; cursor: pointer; }
+  button:hover { background: #345248; }
+  .toolbar { display: flex; justify-content: center; gap: 6px; flex-wrap: wrap; }
+  #status { min-height: 1.2em; color: #b8e6c8; }
+  kbd { border: 1px solid #555; padding: 0 4px; }
+  #settings { display: none; text-align: left; width: min(90vw, 560px); box-sizing: border-box;
+    border: 1px solid #638276; background: #19242b; padding: 14px 16px; margin: 12px auto; }
+  #settings.open { display: block; }
+  #settings .srow { margin: 4px 0; }
+  #settings label { display: inline-block; width: 130px; }
+  #keymap button { min-width: 110px; margin: 2px; }
+</style>
+</head>
+<body>
+<h1>Game Boy Emulator</h1>
+<div class="row"><canvas id="screen" width="160" height="144"></canvas></div>
+<div class="row toolbar">
+  <input type="file" id="rom" accept=".gb,.gbc">
+  <button id="pause">Pause</button>
+  <button id="reset">Reset</button>
+  <button id="savestate">Save state</button>
+  <button id="loadstate">Load state</button>
+  <button id="settings-toggle" type="button">Settings</button>
+</div>
+<div id="settings" aria-hidden="true">
+  <strong>Settings</strong>
+  <div class="srow"><label for="volume">Volume</label><input id="volume" type="range" min="0" max="100" value="100"><span id="volume-value">100%</span></div>
+  <div class="srow"><label for="palette">Palette</label><select id="palette"><option value="none">None</option><option value="green">Green</option><option value="sepia">Sepia</option></select></div>
+  <div class="srow"><label for="speed">Speed</label><select id="speed"><option value="1">1x</option><option value="2">2x</option><option value="3">3x</option><option value="4">4x</option><option value="5">5x</option></select></div>
+  <div class="srow"><label>Remap keys</label><span id="keymap"></span></div>
+</div>
+<div id="status">Pick a .gb ROM to start.</div>
+<div class="row">
+  <kbd>&larr;</kbd><kbd>&rarr;</kbd><kbd>&uarr;</kbd><kbd>&darr;</kbd> move &middot;
+  <kbd>Z</kbd> A &middot; <kbd>X</kbd> B &middot;
+  <kbd>Shift</kbd> Select &middot; <kbd>Enter</kbd> Start
+</div>
+<div class="row">Sound plays through your browser once a ROM is loaded (starts on the file-picker click).</div>
+<script src="app.js"></script>
+{{{ SCRIPT }}}
+</body>
+</html>
