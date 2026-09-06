@@ -5,7 +5,7 @@
 
 /* Invalid SM83 opcodes execute as 4-cycle NOPs; with debugging enabled they
    are also reported on stderr to fail loudly instead of hiding decoder gaps. */
-#define STATE_VERSION 11u
+#define STATE_VERSION 14u
 #define STATE_HEADER_SIZE 24u
 #define MAX_BREAKPOINTS 16u
 #define RTC_SAVE_SIZE 24u
@@ -25,18 +25,21 @@ struct gb {
   size_t rom_size, ram_size;
   uint32_t fb[160 * 144];
   uint8_t bg_line[160];
-  uint16_t af, bc, de, hl, sp, pc, timer, divider;
+  uint16_t af, bc, de, hl, sp, pc, t_clock, divider;
   uint8_t ime, ei_delay, halted, halt_bug, input, div, mbc, battery, ram_bank,
-      ram_enable, upper, mode, ppu_mode, stat_signal, dma_page, dma_index,
-      dma_active, timer_signal, rtc_select, rtc_latched_valid, rtc[5],
-      rtc_latched[5], vbk, svbk, bg_palette_index, obj_palette_index, key1, opri,
-      ir, serial_active, boot_enabled, double_speed;
+      ram_enable, upper, mode, ppu_mode, stat_signal, ppu_first_line, dma_page,
+      dma_index, dma_active, dma_copy, timer_signal, rtc_select,
+      rtc_latched_valid, rtc[5], rtc_latched[5], vbk, svbk, bg_palette_index,
+      obj_palette_index, key1, opri, ir, serial_active, boot_enabled,
+      double_speed;
   uint16_t rom_bank;
   uint16_t hdma_source, hdma_dest;
   uint8_t hdma5;
   uint16_t serial_cycles;
+  uint16_t timer_due;
+  uint16_t dma_busy_start, dma_busy_end, dma_next;
+  uint16_t ppu_mode3;
   unsigned ppu_cycles;
-  unsigned dma_cycles;
   uint32_t rtc_cycles;
   uint32_t audio_remainder;
   uint32_t audio_phase[4];
@@ -68,7 +71,7 @@ static uint8_t f(const gb_t *g, unsigned n) {
 static void fs(gb_t *g, unsigned z, unsigned n, unsigned h, unsigned c) {
   g->af = (uint16_t)((g->af & 0xff00) | (z << 7 | n << 6 | h << 5 | c << 4));
 }
-static uint8_t rd(const gb_t *, uint16_t);
+static uint8_t rd(gb_t *, uint16_t);
 static void wr(gb_t *, uint16_t, uint8_t);
 static void tick(gb_t *, unsigned);
 static void ppu_tick(gb_t *);
@@ -371,6 +374,23 @@ static unsigned timer_bit(const gb_t *g) {
 static unsigned timer_level(const gb_t *g) {
   return (g->mem[0xff07] & 4) && ((g->divider >> timer_bit(g)) & 1);
 }
+static void timer_fire(gb_t *g) {
+  g->mem[0xff05] = g->mem[0xff06];
+  g->mem[0xff0f] |= 4;
+  g->timer_due = 0;
+}
+static void timer_fire_if_due(gb_t *g) {
+  if (g->timer_due && (uint16_t)(g->t_clock - g->timer_due) < 0x8000)
+    timer_fire(g);
+}
+static void timer_schedule(gb_t *g, unsigned edgem) {
+  if (!g->timer_due)
+    g->timer_due = (uint16_t)(4 * (edgem + 2));
+}
+static void timer_increment(gb_t *g, unsigned edgem) {
+  if (++g->mem[0xff05] == 0)
+    timer_schedule(g, edgem);
+}
 static uint8_t *rp8(gb_t *g, unsigned n) {
   switch (n) {
   case 0:
@@ -530,12 +550,29 @@ static void joypad_irq(gb_t *g, uint8_t old_input, uint8_t new_input,
        (uint8_t)~joypad_lines(new_input, g->mem[0xff00] & 0x30)) != 0)
     g->mem[0xff0f] |= 0x10;
 }
-static uint8_t rd(const gb_t *g, uint16_t a) {
+static uint8_t rd(gb_t *g, uint16_t a) {
   if (g->debug_enabled && !g->debug_fetch)
     for (unsigned i = 0; i < MAX_BREAKPOINTS; i++)
       if (g->breakpoint_used[i] && g->breakpoints[i].kind == GB_BP_READ &&
           g->breakpoints[i].addr == a)
         ((gb_t *)g)->watch_hit = (uint8_t)(i + 1);
+  /* OAM DMA bus conflict: only HRAM and FF46 stay accessible while the
+       transfer owns the bus. A read is blocked when its M-cycle overlaps
+       the busy window. */
+  if (g->dma_active && !g->dma_copy && a < 0xff80 && a != 0xff46 &&
+      (uint16_t)(g->t_clock - (g->dma_busy_start - 3)) <
+          (uint16_t)(g->dma_busy_end - (g->dma_busy_start - 3)))
+    return 0xff;
+  /* PPU owns OAM during modes 2-3 and VRAM during mode 3: CPU reads see
+     $FF. Writes stay permissive (hardware corrupts; emulating that would
+     break legitimate setup writes). Debugger DMA-copy reads bypass. */
+  if (!g->dma_copy && (g->mem[0xff40] & 0x80)) {
+    if (a >= 0x8000 && a < 0xa000 && g->ppu_mode == 3)
+      return 0xff;
+    if (a >= 0xfe00 && a < 0xfea0 &&
+        (g->ppu_mode == 2 || g->ppu_mode == 3))
+      return 0xff;
+  }
   if (g->boot_enabled && a < 0x100)
     return g->boot_rom[a];
   if (g->boot_enabled && g->model == GB_MODEL_CGB && a >= 0x200 && a < 0x900)
@@ -555,9 +592,20 @@ static uint8_t rd(const gb_t *g, uint16_t a) {
     return a < 0xfea0 ? g->oam[a - 0xfe00] : 0xff;
   if (a == 0xff44)
     return g->mem[a];
-  if (a == 0xff41)
-    return (uint8_t)(g->mem[a] | 0x80 | (g->mem[0xff45] == g->mem[0xff44] ? 4 : 0) |
+  if (a == 0xff41) {
+    /* While the LCD is off the comparison clock is stopped and bit 2
+       stays frozen at the value stored on disable (mem bit 2). */
+    uint8_t stored = g->mem[a];
+    unsigned coincidence;
+    if (g->mem[0xff40] & 0x80) {
+      stored &= (uint8_t)~4; /* stale frozen bit must not leak into live reads */
+      coincidence = (g->mem[0xff45] == g->mem[0xff44]);
+    } else {
+      coincidence = (stored & 4);
+    }
+    return (uint8_t)(stored | 0x80 | (coincidence ? 4 : 0) |
                      g->ppu_mode);
+  }
   if (a == 0xff4d)
     return g->model == GB_MODEL_CGB ? (uint8_t)(0x7e | g->key1) : 0xff;
   if (a == 0xff6c)
@@ -586,6 +634,8 @@ static uint8_t rd(const gb_t *g, uint16_t a) {
   }
   if (a >= 0xff51 && a <= 0xff55)
     return a == 0xff55 ? g->hdma5 : g->mem[a];
+  if (a == 0xff05)
+    timer_fire_if_due(g);
   return a == 0xff00 ? jp(g) : g->mem[a];
 }
 static void wr(gb_t *g, uint16_t a, uint8_t v) {
@@ -594,6 +644,10 @@ static void wr(gb_t *g, uint16_t a, uint8_t v) {
       if (g->breakpoint_used[i] && g->breakpoints[i].kind == GB_BP_WRITE &&
           g->breakpoints[i].addr == a)
         g->watch_hit = (uint8_t)(i + 1);
+  if (g->dma_active && a < 0xff80 && a != 0xff46 &&
+      (uint16_t)(g->t_clock - (g->dma_busy_start - 3)) <
+          (uint16_t)(g->dma_busy_end - (g->dma_busy_start - 3)))
+    return;
   if (a >= 0xe000 && a < 0xfe00)
     a = (uint16_t)(a - 0x2000);
   if (a >= 0xc000 && a < 0xd000) {
@@ -798,22 +852,39 @@ static void wr(gb_t *g, uint16_t a, uint8_t v) {
     g->mem[a] = v;
     return;
   }
+  if (a == 0xff05) {
+    if (g->timer_due) {
+      uint16_t preceding = (uint16_t)(g->t_clock / 4 - 1);
+      uint16_t edgem = (uint16_t)(g->timer_due / 4 - 2);
+      if (preceding == edgem) {
+        g->timer_due = 0;
+        g->mem[a] = v;
+        return;
+      }
+      if (preceding == (uint16_t)(edgem + 1))
+        return;
+    }
+    g->mem[a] = v;
+    timer_fire_if_due(g);
+    return;
+  }
+  if (a == 0xff06) {
+    g->mem[a] = v;
+    timer_fire_if_due(g);
+    return;
+  }
   if (a == 0xff04) {
     unsigned old_signal = g->timer_signal;
     unsigned old_audio_signal = (g->divider >> 12) & 1;
     g->mem[a] = 0;
     g->divider = 0;
     g->div = 0;
-    g->timer = 0;
     g->timer_signal = 0;
+  g->timer_due = 0;
     if (old_audio_signal)
       audio_sequence(g);
-    if (old_signal && !timer_level(g)) {
-      if (++g->mem[0xff05] == 0) {
-        g->mem[0xff05] = g->mem[0xff06];
-        g->mem[0xff0f] |= 4;
-      }
-    }
+    if (old_signal && !timer_level(g))
+      timer_increment(g, (unsigned)(g->t_clock / 4) - 1);
     return;
   }
   if (a == 0xff41) {
@@ -827,7 +898,14 @@ static void wr(gb_t *g, uint16_t a, uint8_t v) {
     g->mem[a] = v;
     g->dma_page = v;
     g->dma_index = 0;
-    g->dma_cycles = 0;
+    /* Busy for 160 M-cycles starting 1 M-cycle after the write M-cycle;
+       the first byte lands at the end of the 2nd M-cycle. A restart while
+       busy keeps the old start and extends the end. */
+    if (!(g->dma_active && (uint16_t)(g->t_clock - g->dma_busy_start) <
+                                (uint16_t)(g->dma_busy_end - g->dma_busy_start)))
+      g->dma_busy_start = (uint16_t)(g->t_clock + 8);
+    g->dma_busy_end = (uint16_t)(g->t_clock + 648);
+    g->dma_next = (uint16_t)(g->t_clock + 12);
     g->dma_active = 1;
     return;
   }
@@ -835,13 +913,28 @@ static void wr(gb_t *g, uint16_t a, uint8_t v) {
     uint8_t old = g->mem[a];
     g->mem[a] = v;
     if (!(v & 0x80)) {
-      g->ppu_mode = 0;
-      g->ppu_cycles = 0;
-      g->mem[0xff44] = 0;
+      if (old & 0x80) {
+        /* Freeze the LY=LYC bit: the comparison clock stops with LCD off. */
+        if (g->mem[0xff45] == g->mem[0xff44])
+          g->mem[0xff41] |= 4;
+        else
+          g->mem[0xff41] &= (uint8_t)~4;
+        g->ppu_mode = 0;
+        g->ppu_cycles = 0;
+        g->mem[0xff44] = 0;
+      }
     } else if (!(old & 0x80)) {
-      g->ppu_mode = 2;
-      g->ppu_cycles = 0;
+      /* LCD enabled: hardware reports mode 0 for the first ~76 dots of
+         line 0 with OAM/VRAM still accessible (mooneye stat_lyc_onoff),
+         then runs a truncated 4-dot mode 2 so the first line keeps its
+         456-dot length: 76 + 4 + 172 + 204. */
+      g->ppu_mode = 0;
+      g->ppu_cycles = 128; /* 204 - 76 dots of mode 0 remain */
+      g->ppu_first_line = 1;
       g->mem[0xff44] = 0;
+      /* Restarting the comparison clock re-evaluates LY=LYC from LY=0 and
+         raises STAT on a 0->1 edge (mooneye stat_lyc_onoff round 4). */
+      ppu_stat(g);
     }
     return;
   }
@@ -855,12 +948,8 @@ static void wr(gb_t *g, uint16_t a, uint8_t v) {
     g->mem[a] = (uint8_t)(v & 7);
     unsigned new_signal = timer_level(g);
     g->timer_signal = (uint8_t)new_signal;
-    if (old_signal && !new_signal) {
-      if (++g->mem[0xff05] == 0) {
-        g->mem[0xff05] = g->mem[0xff06];
-        g->mem[0xff0f] |= 4;
-      }
-    }
+    if (old_signal && !new_signal)
+      timer_increment(g, (unsigned)(g->t_clock / 4) - 1);
     return;
   }
   if (a == 0xff02) {
@@ -1080,6 +1169,8 @@ static void ppu_line(gb_t *g, unsigned y) {
   }
 }
 static void ppu_stat(gb_t *g) {
+  if (!(g->mem[0xff40] & 0x80))
+    return; /* comparison clock stopped while LCD is off */
   uint8_t lyc = g->mem[0xff45], stat = g->mem[0xff41];
   unsigned signal = ((g->ppu_mode == 0) && (stat & 8)) ||
                     ((g->ppu_mode == 1) && (stat & 16)) ||
@@ -1088,24 +1179,85 @@ static void ppu_stat(gb_t *g) {
   if (signal && !g->stat_signal) g->mem[0xff0f] |= 2;
   g->stat_signal = (uint8_t)signal;
 }
+static unsigned ppu_mode3_length(gb_t *g) {
+  /* Pan Docs "Mode 3 length": 172 dots base + SCX discard penalty + window
+     setup penalty + one fetch penalty per sprite on the line. */
+  uint8_t lcdc = g->mem[0xff40];
+  unsigned y = g->mem[0xff44];
+  unsigned len = 172 + (g->mem[0xff43] & 7);
+  int wx = (int)g->mem[0xff4b] - 7;
+  if ((lcdc & 0x20) && y >= g->mem[0xff4a] && wx > 0 && wx < 160)
+    len += 6;
+  if (!(lcdc & 2)) return len;
+  unsigned height = (lcdc & 4) ? 16 : 8;
+  uint8_t idx[10];
+  unsigned n = 0;
+  for (unsigned j = 0; j < 40 && n < 10; j++) {
+    int line = (int)y - g->oam[j * 4] + 16;
+    if (line < 0 || line >= (int)height) continue;
+    idx[n++] = (uint8_t)j;
+  }
+  for (unsigned i = 1; i < n; i++) { /* stable: OAM order breaks X ties */
+    uint8_t t = idx[i], k = (uint8_t)i;
+    while (k > 0 && g->oam[idx[k - 1] * 4 + 1] > g->oam[t * 4 + 1]) {
+      idx[k] = idx[k - 1];
+      k--;
+    }
+    idx[k] = t;
+  }
+  bool seen = false;
+  int seen_key = 0;
+  for (unsigned i = 0; i < n; i++) {
+    uint8_t sx = g->oam[idx[i] * 4 + 1];
+    if (sx >= 168) continue; /* past the right edge */
+    int x = (int)sx - 8;
+    int win = (lcdc & 0x20) && y >= g->mem[0xff4a] && x >= wx;
+    int eff = win ? x - wx : x + g->mem[0xff43];
+    int tile = eff >= 0 ? eff / 8 : -((-eff + 7) / 8);
+    int key = (win << 24) | (tile & 0xffffff);
+    int wait = 5 - (eff - tile * 8);
+    if (wait < 0) wait = 0;
+    /* The first object fetch overlaps the initial fetcher startup. */
+    if (!seen)
+      len += 3 + (unsigned)wait;
+    else if (key != seen_key)
+      len += 6 + (unsigned)wait;
+    else
+      len += 6;
+    seen = true;
+    seen_key = key;
+  }
+  return len;
+}
 static void ppu_tick(gb_t *g) {
   if (!(g->mem[0xff40] & 0x80)) return;
-  if (++g->ppu_cycles < (g->ppu_mode == 2 ? 80 : g->ppu_mode == 3 ? 172 :
-                         g->ppu_mode == 1 ? 456 : 204)) return;
+  if (++g->ppu_cycles < (g->ppu_mode == 2 ? 80 : g->ppu_mode == 3 ? g->ppu_mode3 :
+                         g->ppu_mode == 1 ? 456 : 456u - 80u - g->ppu_mode3)) return;
   g->ppu_cycles = 0;
-  if (g->ppu_mode == 2) g->ppu_mode = 3;
-  else if (g->ppu_mode == 3) {
+  if (g->ppu_mode == 2) {
+    g->ppu_mode = 3;
+    g->ppu_mode3 = (uint16_t)ppu_mode3_length(g);
+  } else if (g->ppu_mode == 3) {
     ppu_line(g, g->mem[0xff44]);
     g->ppu_mode = 0;
     if (g->model == GB_MODEL_CGB && g->mem[0xff44] < 144 &&
         !(g->hdma5 & 0x80) && g->hdma5 != 0xff)
       cgb_dma_block(g);
   } else if (g->ppu_mode == 0) {
-    g->mem[0xff44]++;
-    if (g->mem[0xff44] == 144) {
-      g->ppu_mode = 1;
-      g->mem[0xff0f] |= 1;
-    } else g->ppu_mode = 2;
+    if (g->ppu_first_line) {
+      /* End of the post-enable mode-0 window: line 0 stays selected and a
+         truncated 4-dot OAM search follows. */
+      g->ppu_first_line = 0;
+      g->ppu_mode = 2;
+      g->ppu_cycles = 76;
+    } else {
+      g->mem[0xff44]++;
+      if (g->mem[0xff44] == 144) {
+        g->ppu_mode = 1;
+        g->mem[0xff0f] |= 1;
+      } else
+        g->ppu_mode = 2;
+    }
   } else {
     g->mem[0xff44]++;
     if (g->mem[0xff44] >= 154) {
@@ -1117,6 +1269,7 @@ static void ppu_tick(gb_t *g) {
 }
 static void tick(gb_t *g, unsigned n) {
   while (n--) {
+    timer_fire_if_due(g);
     audio_tick(g);
     if (g->mbc == 3 && ++g->rtc_cycles == 4194304u) {
       g->rtc_cycles = 0;
@@ -1131,16 +1284,15 @@ static void tick(gb_t *g, unsigned n) {
     g->timer_signal = (uint8_t)now;
     if (old_audio_signal && !((g->divider >> 12) & 1))
       audio_sequence(g);
-    if (old && !now) {
-      if (++g->mem[0xff05] == 0) {
-        g->mem[0xff05] = g->mem[0xff06];
-        g->mem[0xff0f] |= 4;
-      }
-    }
+    if (old && !now)
+      timer_increment(g, (unsigned)(g->t_clock / 4));
     ppu_tick(g);
-    if (g->dma_active && ++g->dma_cycles == 4) {
-      g->dma_cycles = 0;
-      g->oam[g->dma_index] = rd(g, (uint16_t)(g->dma_page * 0x100 + g->dma_index));
+    if (g->dma_active && g->t_clock == g->dma_next) {
+      g->dma_copy = 1;
+      g->oam[g->dma_index] =
+          rd(g, (uint16_t)(g->dma_page * 0x100 + g->dma_index));
+      g->dma_copy = 0;
+      g->dma_next = (uint16_t)(g->dma_next + 4);
       if (++g->dma_index == sizeof g->oam)
         g->dma_active = 0;
     }
@@ -1162,6 +1314,7 @@ static void tick(gb_t *g, unsigned n) {
       g->serial_active = 0;
       g->serial_cycles = 0;
     }
+    g->t_clock++;
   }
 }
 static int irq(gb_t *g) {
@@ -1184,14 +1337,11 @@ static int irq(gb_t *g) {
 }
 int gb_dbg_step(gb_t *g) {
   g->debug_pc_hit = 0;
+  timer_fire_if_due(g);
   int q = irq(g);
   if (q) {
     tick(g, q);
     return q;
-  }
-  if (g->dma_active) {
-    tick(g, 4);
-    return 4;
   }
   if (g->halted) {
     tick(g, 4);
@@ -1661,7 +1811,7 @@ int gb_load_ram(gb_t *g, const uint8_t *data, size_t n) {
 }
 size_t gb_save_state_size(const gb_t *g) {
   return g ? STATE_HEADER_SIZE + 0x10000u + sizeof g->vram + sizeof g->wram +
-                          0xa0u + sizeof g->fb + sizeof g->bg_line + 285u + g->ram_size
+                           0xa0u + sizeof g->fb + sizeof g->bg_line + 292u + g->ram_size
            : 0;
 }
 size_t gb_save_state(const gb_t *g, uint8_t *out) {
@@ -1711,14 +1861,19 @@ size_t gb_save_state(const gb_t *g, uint8_t *out) {
   *p++ = g->mode;
   *p++ = g->ppu_mode;
   *p++ = g->stat_signal;
+  *p++ = g->ppu_first_line;
   *p++ = g->dma_page;
   *p++ = g->dma_index;
   *p++ = g->dma_active;
-  put16(&p, g->timer);
+  put16(&p, g->dma_busy_start);
+  put16(&p, g->dma_busy_end);
+  put16(&p, g->dma_next);
+  put16(&p, g->t_clock);
    put32(&p, g->ppu_cycles);
-  put32(&p, g->dma_cycles);
+  put16(&p, g->ppu_mode3);
   put16(&p, g->divider);
   *p++ = g->timer_signal;
+  put16(&p, g->timer_due);
   *p++ = g->rtc_select;
   *p++ = g->rtc_latched_valid;
   memcpy(p, g->rtc, sizeof g->rtc);
@@ -1808,14 +1963,19 @@ int gb_load_state(gb_t *g, const uint8_t *data, size_t n) {
   g->mode = *p++;
   g->ppu_mode = *p++;
   g->stat_signal = *p++;
+  g->ppu_first_line = *p++;
   g->dma_page = *p++;
   g->dma_index = *p++;
   g->dma_active = *p++;
-  g->timer = get16(&p);
+  g->dma_busy_start = get16(&p);
+  g->dma_busy_end = get16(&p);
+  g->dma_next = get16(&p);
+  g->t_clock = get16(&p);
    g->ppu_cycles = get32(&p);
-  g->dma_cycles = get32(&p);
+  g->ppu_mode3 = get16(&p);
   g->divider = get16(&p);
   g->timer_signal = *p++;
+  g->timer_due = get16(&p);
   g->rtc_select = *p++;
   g->rtc_latched_valid = *p++;
   memcpy(g->rtc, p, sizeof g->rtc);
@@ -1879,15 +2039,17 @@ void gb_reset(gb_t *g) {
   g->rom_bank = 1;
   g->ram_bank = g->upper = g->mode = 0;
   g->div = 0;
-  g->divider = g->timer = 0;
+  g->divider = g->t_clock = 0;
   g->rtc_cycles = 0;
   g->audio_remainder = 0;
   g->timer_signal = 0;
   g->ppu_cycles = 0;
   g->ppu_mode = 2;
+  g->ppu_mode3 = 172;
   g->stat_signal = 0;
-  g->dma_page = g->dma_index = g->dma_active = 0;
-  g->dma_cycles = 0;
+  g->ppu_first_line = 0;
+  g->dma_page = g->dma_index = g->dma_active = g->dma_copy = 0;
+  g->dma_busy_start = g->dma_busy_end = g->dma_next = 0;
   g->vbk = 0;
   g->svbk = 1;
   g->hdma_source = g->hdma_dest = 0;
@@ -1956,7 +2118,7 @@ void gb_unlink_serial(gb_t *g) {
     g->serial_peer = NULL;
   }
 }
-uint8_t gb_dbg_read(const gb_t *g, uint16_t a) { return rd(g, a); }
+uint8_t gb_dbg_read(gb_t *g, uint16_t a) { return rd(g, a); }
 void gb_dbg_write(gb_t *g, uint16_t a, uint8_t v) { wr(g, a, v); }
 void gb_dbg_regs(const gb_t *g, gb_regs_t *o) {
   o->af = g->af;
@@ -1968,7 +2130,7 @@ void gb_dbg_regs(const gb_t *g, gb_regs_t *o) {
   o->ime = g->ime;
   o->halted = g->halted;
 }
-int gb_dbg_disasm(const gb_t *g, uint16_t a, char *buf, size_t n) {
+int gb_dbg_disasm(gb_t *g, uint16_t a, char *buf, size_t n) {
   uint8_t op = rd(g, a);
   unsigned length = 1;
   char text[32];

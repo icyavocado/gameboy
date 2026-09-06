@@ -19,6 +19,26 @@ fi
 unzip -q -o "$archive" 'mooneye-test-suite/acceptance/instr/daa.gb' \
   'mooneye-test-suite/acceptance/timer/div_write.gb' \
   'mooneye-test-suite/acceptance/oam_dma/basic.gb' \
+  'mooneye-test-suite/acceptance/oam_dma/reg_read.gb' \
+  'mooneye-test-suite/acceptance/ppu/intr_2_0_timing.gb' \
+  'mooneye-test-suite/acceptance/ppu/intr_2_mode0_timing.gb' \
+  'mooneye-test-suite/acceptance/ppu/intr_2_mode0_timing_sprites.gb' \
+  'mooneye-test-suite/acceptance/ppu/intr_2_mode3_timing.gb' \
+  'mooneye-test-suite/acceptance/ppu/intr_2_oam_ok_timing.gb' \
+  'mooneye-test-suite/acceptance/ppu/stat_lyc_onoff.gb' \
+  'mooneye-test-suite/acceptance/ppu/stat_irq_blocking.gb' \
+  'mooneye-test-suite/acceptance/timer/rapid_toggle.gb' \
+  'mooneye-test-suite/acceptance/timer/tim00.gb' \
+  'mooneye-test-suite/acceptance/timer/tim01.gb' \
+  'mooneye-test-suite/acceptance/timer/tim10.gb' \
+  'mooneye-test-suite/acceptance/timer/tim11.gb' \
+  'mooneye-test-suite/acceptance/timer/tim00_div_trigger.gb' \
+  'mooneye-test-suite/acceptance/timer/tim01_div_trigger.gb' \
+  'mooneye-test-suite/acceptance/timer/tim10_div_trigger.gb' \
+  'mooneye-test-suite/acceptance/timer/tim11_div_trigger.gb' \
+  'mooneye-test-suite/acceptance/timer/tima_reload.gb' \
+  'mooneye-test-suite/acceptance/timer/tima_write_reloading.gb' \
+  'mooneye-test-suite/acceptance/timer/tma_write_reloading.gb' \
   'mooneye-test-suite/acceptance/ei_sequence.gb' \
   'same-suite/apu/channel_3/channel_3_stop_delay.gb' \
   'same-suite/apu/channel_3/channel_3_delay.gb' \

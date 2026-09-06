@@ -33,7 +33,7 @@ void gb_set_audio_callback(gb_t *gb, gb_audio_cb callback, void *user);
 void gb_set_serial_callback(gb_t *gb, gb_serial_cb callback, void *user);
 void gb_link_serial(gb_t *a, gb_t *b);
 void gb_unlink_serial(gb_t *gb);
-uint8_t gb_dbg_read(const gb_t *gb, uint16_t address);
+uint8_t gb_dbg_read(gb_t *gb, uint16_t address);
 void gb_dbg_write(gb_t *gb, uint16_t address, uint8_t value);
 void gb_dbg_regs(const gb_t *gb, gb_regs_t *out);
 int gb_dbg_step(gb_t *gb);
@@ -41,6 +41,6 @@ void gb_dbg_enable(gb_t *gb, bool enabled);
 int gb_dbg_run_until_break(gb_t *gb);
 int gb_dbg_add_bp(gb_t *gb, gb_bp_t breakpoint);
 void gb_dbg_del_bp(gb_t *gb, int id);
-int gb_dbg_disasm(const gb_t *gb, uint16_t address, char *buf, size_t size);
+int gb_dbg_disasm(gb_t *gb, uint16_t address, char *buf, size_t size);
 
 #endif

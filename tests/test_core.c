@@ -238,6 +238,9 @@ UTEST(core, timer_overflow_and_reset_state) {
   gb_dbg_write(g, 0xff05, 0xff);
   gb_dbg_write(g, 0xff07, 0x05);
   step(g, 4);
+  ASSERT_EQ(gb_dbg_read(g, 0xff05), 0);
+  ASSERT_EQ(gb_dbg_read(g, 0xff0f) & 4, 0);
+  step(g, 1);
   ASSERT_EQ(gb_dbg_read(g, 0xff05), 0x42);
   ASSERT_EQ(gb_dbg_read(g, 0xff0f) & 4, 4);
   gb_dbg_write(g, 0xffff, 0xff);
@@ -1019,10 +1022,125 @@ UTEST(core, oam_dma_transfer) {
   for (unsigned i = 0; i < 160; i++)
     gb_dbg_write(g, (uint16_t)(0xc000 + i), (uint8_t)(i ^ 0x5a));
   gb_dbg_write(g, 0xff46, 0xc0);
-  for (unsigned i = 0; i < 160; i++)
-    ASSERT_EQ(gb_dbg_step(g), 4);
+  /* The CPU keeps running during DMA: two NOPs execute while OAM is
+     still accessible, then the bus goes busy (OAM reads $FF, FF46 still
+     readable) until the 160-byte transfer finishes. */
+  ASSERT_EQ(gb_dbg_step(g), 4);
+  ASSERT_EQ(gb_dbg_step(g), 4);
+  ASSERT_EQ(gb_dbg_read(g, 0xfe00), 0xff);
+  ASSERT_EQ(gb_dbg_read(g, 0xff46), 0xc0);
+  step(g, 200);
+  /* OAM reads are $FF while the PPU is in modes 2-3, so stop the LCD
+     before verifying the transferred bytes. */
+  gb_dbg_write(g, 0xff40, 0);
   for (unsigned i = 0; i < 160; i++)
     ASSERT_EQ(gb_dbg_read(g, (uint16_t)(0xfe00 + i)), (uint8_t)(i ^ 0x5a));
+  gb_destroy(g);
+}
+
+UTEST(ppu, lcd_enable_reports_mode0_first) {
+  gb_t *g = load((const uint8_t[]){0x00}, 1);
+  gb_dbg_write(g, 0xfe00, 0x34);
+  gb_dbg_write(g, 0xff40, 0x00); /* LCD off */
+  gb_dbg_write(g, 0xff40, 0x91); /* LCD on: 76-dot mode-0 window on line 0 */
+  ASSERT_EQ(gb_dbg_read(g, 0xff41) & 3, 0);
+  ASSERT_EQ(gb_dbg_read(g, 0xff44), 0);
+  ASSERT_EQ(gb_dbg_read(g, 0xfe00), 0x34); /* OAM still accessible */
+  step(g, 19); /* 76 dots: truncated 4-dot mode 2 follows */
+  ASSERT_EQ(gb_dbg_read(g, 0xff41) & 3, 2);
+  ASSERT_EQ(gb_dbg_read(g, 0xfe00), 0xff); /* OAM now owned by the PPU */
+  step(g, 1); /* mode 2 expires after 4 dots total */
+  ASSERT_EQ(gb_dbg_read(g, 0xff41) & 3, 3);
+  step(g, 43 + 51); /* mode 3 + mode 0: line 0 keeps its 456-dot length */
+  ASSERT_EQ(gb_dbg_read(g, 0xff44), 1);
+  ASSERT_EQ(gb_dbg_read(g, 0xff41) & 3, 2);
+  gb_destroy(g);
+}
+
+UTEST(ppu, oam_vram_blocked_by_mode) {
+  gb_t *g = load((const uint8_t[]){0x00}, 1);
+  gb_dbg_write(g, 0x8000, 0x12);
+  gb_dbg_write(g, 0xfe00, 0x34);
+  /* Fresh from reset the PPU is in mode 2: OAM reads $FF, VRAM is open. */
+  ASSERT_EQ(gb_dbg_read(g, 0xfe00), 0xff);
+  ASSERT_EQ(gb_dbg_read(g, 0x8000), 0x12);
+  /* 80 T-cycles later mode 3 starts: both regions read $FF. */
+  step(g, 20);
+  ASSERT_EQ(gb_dbg_read(g, 0xfe00), 0xff);
+  ASSERT_EQ(gb_dbg_read(g, 0x8000), 0xff);
+  /* Writes stay permissive; switching the LCD off reopens bus reads. */
+  gb_dbg_write(g, 0x8000, 0x56);
+  gb_dbg_write(g, 0xff40, 0);
+  ASSERT_EQ(gb_dbg_read(g, 0x8000), 0x56);
+  ASSERT_EQ(gb_dbg_read(g, 0xfe00), 0x34);
+  gb_destroy(g);
+}
+
+UTEST(ppu, stat_lyc_freeze_and_enable_irq) {
+  gb_t *g = load((const uint8_t[]){0x76}, 1);
+  gb_dbg_write(g, 0xff41, 0x40);
+  gb_dbg_write(g, 0xffff, 0x02);
+  gb_dbg_write(g, 0xff0f, 0);
+  /* Walk 144 scanlines to VBlank. */
+  step(g, 144u * 114u);
+  ASSERT_EQ(gb_dbg_read(g, 0xff44), 144);
+  gb_dbg_write(g, 0xff0f, 0);
+  gb_dbg_write(g, 0xff45, 0x90); /* LYC=144=LY */
+  gb_dbg_write(g, 0xff40, 0x00); /* disable: freeze coincidence bit=1 */
+  gb_dbg_write(g, 0xff0f, 0);
+  ASSERT_EQ(gb_dbg_read(g, 0xff41), 0xc4);
+  gb_dbg_write(g, 0xff45, 0x01); /* clock stopped: bit stays frozen */
+  ASSERT_EQ(gb_dbg_read(g, 0xff41), 0xc4);
+  ASSERT_EQ(gb_dbg_read(g, 0xff0f) & 0x02, 0);
+  gb_dbg_write(g, 0xff40, 0x91); /* enable: LY=0 vs LYC=1, no IRQ */
+  ASSERT_EQ(gb_dbg_read(g, 0xff41), 0xc0);
+  ASSERT_EQ(gb_dbg_read(g, 0xff0f) & 0x02, 0);
+  gb_dbg_write(g, 0xff40, 0x00); /* disable with live bit=0: freeze 0 */
+  ASSERT_EQ(gb_dbg_read(g, 0xff41), 0xc0);
+  gb_dbg_write(g, 0xff45, 0x00); /* while off: no re-eval, no IRQ */
+  ASSERT_EQ(gb_dbg_read(g, 0xff0f) & 0x02, 0);
+  gb_dbg_write(g, 0xff40, 0x91); /* enable: LY=0==LYC -> 0->1 edge, IRQ */
+  ASSERT_EQ(gb_dbg_read(g, 0xff41), 0xc4);
+  ASSERT_TRUE(gb_dbg_read(g, 0xff0f) & 0x02);
+  gb_destroy(g);
+}
+
+static unsigned mode2_to_mode0_dots(gb_t *g) {
+  unsigned sum = 0;
+  int guard = 500;
+  while ((gb_dbg_read(g, 0xff41) & 3) != 0 && guard--)
+    sum += (unsigned)gb_dbg_step(g);
+  return sum;
+}
+UTEST(ppu, mode3_sprite_penalty) {
+  /* Fresh from reset the PPU is phase-aligned in mode 2 of line 0, so HALT
+     steps (4 dots each) give exact spans: base mode 3 is 172 dots. */
+  gb_t *g = load((const uint8_t[]){0x76}, 1);
+  ASSERT_EQ(gb_dbg_read(g, 0xff44), 0);
+  ASSERT_EQ(gb_dbg_read(g, 0xff41) & 3, 2);
+  ASSERT_EQ(mode2_to_mode0_dots(g), 252); /* 80 + 172 */
+  gb_destroy(g);
+  g = load((const uint8_t[]){0x76}, 1);
+  gb_dbg_write(g, 0xff40, 0x93); /* keep LCD on, enable sprites */
+  for (unsigned i = 0; i < 10; i++) { /* stacked at X=167: 6 dots each */
+    gb_dbg_write(g, (uint16_t)(0xfe00 + i * 4), 16);
+    gb_dbg_write(g, (uint16_t)(0xfe00 + i * 4 + 1), 167);
+  }
+  ASSERT_EQ(mode2_to_mode0_dots(g), 312); /* +60 */
+  gb_destroy(g);
+  g = load((const uint8_t[]){0x76}, 1);
+  gb_dbg_write(g, 0xff40, 0x93);
+  for (unsigned i = 0; i < 10; i++) { /* spread 8 apart: 11 dots each */
+    gb_dbg_write(g, (uint16_t)(0xfe00 + i * 4), 16);
+    gb_dbg_write(g, (uint16_t)(0xfe00 + i * 4 + 1), (uint8_t)(i * 8));
+  }
+  ASSERT_EQ(mode2_to_mode0_dots(g), 360); /* +108, rounded to steps */
+  gb_destroy(g);
+  g = load((const uint8_t[]){0x76}, 1);
+  gb_dbg_write(g, 0xff40, 0x93);
+  gb_dbg_write(g, 0xfe00, 16); /* single X=0: fixed 11-dot penalty */
+  gb_dbg_write(g, 0xfe01, 0);
+  ASSERT_EQ(mode2_to_mode0_dots(g), 260); /* +7, rounded to steps */
   gb_destroy(g);
 }
 
@@ -1035,6 +1153,50 @@ UTEST(core, timer_uses_divider_edges) {
   ASSERT_EQ(gb_dbg_read(g, 0xff05), 4);
   gb_dbg_write(g, 0xff04, 0);
   ASSERT_EQ(gb_dbg_read(g, 0xff04), 0);
+  gb_destroy(g);
+}
+
+UTEST(core, timer_overflow_reload_delay) {
+  gb_t *g = load((const uint8_t[]){0x00}, 1);
+  gb_dbg_write(g, 0xff06, 0x42);
+  gb_dbg_write(g, 0xff05, 0xff);
+  gb_dbg_write(g, 0xff07, 0x05);
+  gb_dbg_write(g, 0xff0f, 0);
+  gb_dbg_write(g, 0xff04, 0);
+  step(g, 4);
+  ASSERT_EQ(gb_dbg_read(g, 0xff05), 0);
+  ASSERT_EQ(gb_dbg_read(g, 0xff0f) & 4, 0);
+  step(g, 1);
+  ASSERT_EQ(gb_dbg_read(g, 0xff05), 0x42);
+  ASSERT_EQ(gb_dbg_read(g, 0xff0f) & 4, 4);
+  gb_destroy(g);
+}
+
+UTEST(core, timer_overflow_write_cancel_and_ignore) {
+  gb_t *g = load((const uint8_t[]){0x00}, 1);
+  gb_dbg_write(g, 0xff06, 0x42);
+  gb_dbg_write(g, 0xff05, 0xff);
+  gb_dbg_write(g, 0xff07, 0x05);
+  gb_dbg_write(g, 0xff0f, 0);
+  gb_dbg_write(g, 0xff04, 0);
+  step(g, 4);
+  gb_dbg_write(g, 0xff05, 0x99);
+  ASSERT_EQ(gb_dbg_read(g, 0xff05), 0x99);
+  step(g, 2);
+  ASSERT_EQ(gb_dbg_read(g, 0xff05), 0x99);
+  ASSERT_EQ(gb_dbg_read(g, 0xff0f) & 4, 0);
+  gb_destroy(g);
+  g = load((const uint8_t[]){0x00}, 1);
+  gb_dbg_write(g, 0xff06, 0xcd);
+  gb_dbg_write(g, 0xff05, 0xff);
+  gb_dbg_write(g, 0xff07, 0x05);
+  gb_dbg_write(g, 0xff0f, 0);
+  gb_dbg_write(g, 0xff04, 0);
+  step(g, 4);
+  step(g, 1);
+  gb_dbg_write(g, 0xff05, 0x99);
+  ASSERT_EQ(gb_dbg_read(g, 0xff05), 0xcd);
+  ASSERT_EQ(gb_dbg_read(g, 0xff0f) & 4, 4);
   gb_destroy(g);
 }
 
@@ -1095,8 +1257,14 @@ int main(void) {
   core_extended_control_and_stack_opcodes();
   core_conditional_relative_and_signed_stack_arithmetic();
   core_oam_dma_transfer();
+  ppu_lcd_enable_reports_mode0_first();
+  ppu_oam_vram_blocked_by_mode();
+  ppu_stat_lyc_freeze_and_enable_irq();
+  ppu_mode3_sprite_penalty();
   core_timer_uses_divider_edges();
+  core_timer_overflow_reload_delay();
+  core_timer_overflow_write_cancel_and_ignore();
   ppu_stat_write_rechecks_coincidence();
-  puts("27 tests passed");
+  puts("33 tests passed");
   return 0;
 }
