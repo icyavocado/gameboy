@@ -325,7 +325,7 @@ static void draw_settings(SDL_Renderer *renderer, const settings_t *settings,
                     (SDL_Color){255, 240, 180, 255});
       }
     }
-    draw_text(renderer, "ENTER LOAD  ESC BACK", 145, 475, 2,
+    draw_text(renderer, "ENTER LOAD  ESC BACK", 105, 475, 2,
               (SDL_Color){180, 230, 210, 255});
     return;
   }
@@ -775,10 +775,14 @@ int main(int argc, char **argv) {
               }
             } else if (key == SDLK_ESCAPE) {
               settings.browser = 0;
-            } else if (key == SDLK_UP && settings.rom_selected > 0) {
-              settings.rom_selected--;
-            } else if (key == SDLK_DOWN && settings.rom_selected + 1 < settings.rom_count) {
-              settings.rom_selected++;
+            } else if (key == SDLK_UP && settings.rom_count) {
+              settings.rom_selected = settings.rom_selected == 0
+                                          ? settings.rom_count - 1
+                                          : settings.rom_selected - 1;
+            } else if (key == SDLK_DOWN && settings.rom_count) {
+              settings.rom_selected = settings.rom_selected + 1 == settings.rom_count
+                                          ? 0
+                                          : settings.rom_selected + 1;
             } else if ((key == SDLK_RETURN || key == SDLK_KP_ENTER) &&
                        settings.rom_count) {
               settings.confirm_load = 1;
@@ -822,22 +826,20 @@ int main(int argc, char **argv) {
             settings.open = 0;
             settings.remapping = -1;
             SDL_StopTextInput();
-          } else if (key == SDLK_UP && settings.selected > 0) {
-            settings.selected--;
-          } else if (key == SDLK_DOWN && settings.selected < 11) {
-            settings.selected++;
+          } else if (key == SDLK_UP) {
+            settings.selected = settings.selected == 0 ? 11 : settings.selected - 1;
+          } else if (key == SDLK_DOWN) {
+            settings.selected = settings.selected == 11 ? 0 : settings.selected + 1;
           } else if (key == SDLK_LEFT && settings.selected == 1 &&
                      settings.save_slot > 0) {
             settings.save_slot--;
           } else if (key == SDLK_RIGHT && settings.selected == 1 &&
                      settings.save_slot < 4) {
             settings.save_slot++;
-          } else if (key == SDLK_LEFT && settings.selected >= 2 && settings.selected <= 3 &&
-                     settings.state_slot > 0) {
-            settings.state_slot--;
-          } else if (key == SDLK_RIGHT && settings.selected >= 2 && settings.selected <= 3 &&
-                     settings.state_slot < 5) {
-            settings.state_slot++;
+          } else if (key == SDLK_LEFT && settings.selected >= 2 && settings.selected <= 3) {
+            settings.state_slot = settings.state_slot == 0 ? 5 : settings.state_slot - 1;
+          } else if (key == SDLK_RIGHT && settings.selected >= 2 && settings.selected <= 3) {
+            settings.state_slot = settings.state_slot == 5 ? 0 : settings.state_slot + 1;
           } else if (key == SDLK_LEFT && settings.selected == 4 && audio_context.volume >= 10) {
             audio_context.volume -= 10;
           } else if (key == SDLK_RIGHT && settings.selected == 4 && audio_context.volume <= 90) {
