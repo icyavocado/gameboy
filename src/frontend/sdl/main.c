@@ -68,10 +68,23 @@ static int load_ram(gb_t *gb, const char *path) {
   return result;
 }
 
-static void save_state(const gb_t *gb, const char *path, uint8_t *buffer,
-                       size_t size) {
-  if (gb_save_state(gb, buffer) == size)
-    write_file(path, buffer, size);
+static int save_state(const gb_t *gb, const char *path, uint8_t *buffer,
+                      size_t size) {
+  if (gb_save_state(gb, buffer) != size)
+    return -1;
+  return write_file(path, buffer, size);
+}
+
+static int load_state_file(gb_t *gb, const char *path, size_t size) {
+  size_t file_size;
+  uint8_t *file = read_file(path, &file_size);
+  int result = -1;
+  if (file) {
+    if (file_size == size)
+      result = gb_load_state(gb, file, file_size);
+    free(file);
+  }
+  return result;
 }
 
 static int state_slot_path(const char *base, unsigned slot, char *path,
@@ -390,6 +403,9 @@ static void draw_settings(SDL_Renderer *renderer, const settings_t *settings,
   if (settings->config_error)
     draw_text(renderer, "CONFIG SAVE FAILED", 105, 508, 1,
               (SDL_Color){255, 120, 110, 255});
+  if (settings->state_error)
+    draw_text(renderer, "STATE LOAD FAILED - SAVE A NEW STATE", 105, 520, 1,
+              (SDL_Color){255, 120, 110, 255});
   (void)keys;
 }
 
@@ -521,19 +537,328 @@ static int debug_button_at(int x, int y) {
   return x >= 536 && x < 568 && y >= 704 && y < 736;
 }
 
-static void draw_debug_overlay(SDL_Renderer *renderer, const gb_t *gb) {
+typedef struct {
+  uint16_t base;
+  uint16_t selected_address;
+  int selected;
+  char edit[3];
+  unsigned edit_len;
+  char search[6];
+  unsigned search_len;
+  int searching;
+  int search_refine;
+  unsigned search_width;
+  size_t match_count;
+  uint8_t matches[65536];
+  uint8_t snapshot[65536];
+} debug_view_t;
+
+static char hex_digit(unsigned value) {
+  return (char)(value < 10 ? '0' + value : 'A' + value - 10);
+}
+
+static int hex_value(SDL_Keycode key) {
+  if (key >= SDLK_0 && key <= SDLK_9)
+    return (int)(key - SDLK_0);
+  if (key >= SDLK_KP_0 && key <= SDLK_KP_9)
+    return (int)(key - SDLK_KP_0);
+  if (key >= SDLK_a && key <= SDLK_f)
+    return (int)(key - SDLK_a + 10);
+  return -1;
+}
+
+static int hex_char_value(char key) {
+  if (key >= '0' && key <= '9')
+    return key - '0';
+  if (key >= 'A' && key <= 'F')
+    return key - 'A' + 10;
+  return -1;
+}
+
+static void draw_debug_overlay(SDL_Renderer *renderer, gb_t *gb,
+                               debug_view_t *view) {
   gb_regs_t regs;
-  char line[32];
+  char line[64];
+  char disasm[64];
+  static const char *const names[] = {"Z", "N", "H", "C"};
   SDL_SetRenderDrawColor(renderer, 8, 12, 20, 230);
-  SDL_RenderFillRect(renderer, &(SDL_Rect){12, 12, 220, 92});
+  SDL_RenderFillRect(renderer, &(SDL_Rect){8, 8, 624, 560});
   gb_dbg_regs(gb, &regs);
-  draw_text(renderer, "DEBUG", 24, 22, 2, (SDL_Color){255, 240, 180, 255});
-  snprintf(line, sizeof line, "PC %04X", regs.pc);
-  draw_text(renderer, line, 24, 48, 2, (SDL_Color){235, 245, 240, 255});
-  snprintf(line, sizeof line, "AF %04X", regs.af);
-  draw_text(renderer, line, 24, 72, 2, (SDL_Color){235, 245, 240, 255});
-  snprintf(line, sizeof line, "HL %04X", regs.hl);
-  draw_text(renderer, line, 120, 72, 2, (SDL_Color){235, 245, 240, 255});
+  draw_text(renderer, "DEBUG", 20, 18, 2, (SDL_Color){255, 240, 180, 255});
+  draw_text(renderer, "ESC CLOSE  S STEP  C CONTINUE  / SEARCH", 20, 42, 1,
+            (SDL_Color){190, 205, 215, 255});
+  draw_text(renderer, "CPU", 20, 72, 1, (SDL_Color){255, 240, 180, 255});
+  snprintf(line, sizeof line, "AF %04X  BC %04X  DE %04X", regs.af, regs.bc,
+           regs.de);
+  draw_text(renderer, line, 20, 90, 1, (SDL_Color){235, 245, 240, 255});
+  snprintf(line, sizeof line, "HL %04X  SP %04X  PC %04X", regs.hl, regs.sp,
+           regs.pc);
+  draw_text(renderer, line, 20, 106, 1, (SDL_Color){235, 245, 240, 255});
+  snprintf(line, sizeof line, "IME %d  HALT %d", regs.ime, regs.halted);
+  draw_text(renderer, line, 20, 122, 1, (SDL_Color){235, 245, 240, 255});
+  draw_text(renderer, "FLAGS", 220, 72, 1, (SDL_Color){255, 240, 180, 255});
+  for (unsigned i = 0; i < 4; i++) {
+    snprintf(line, sizeof line, "%s %c", names[i],
+             regs.af & (0x80u >> i * 2) ? '*' : '.');
+    draw_text(renderer, line, 220 + (int)i * 38, 90, 1,
+              (SDL_Color){235, 245, 240, 255});
+  }
+  draw_text(renderer, "OPS", 20, 150, 1, (SDL_Color){255, 240, 180, 255});
+  for (unsigned i = 0; i < 6; i++) {
+    uint16_t address = (uint16_t)(regs.pc + i);
+    int length = gb_dbg_disasm(gb, address, disasm, sizeof disasm);
+    snprintf(line, sizeof line, "%c%04X  %.48s", address == regs.pc ? '>' : ' ',
+             address, disasm);
+    draw_text(renderer, line, 20, 168 + (int)i * 16, 1,
+              (SDL_Color){235, 245, 240, 255});
+    if (length > 1)
+      i += (unsigned)length - 1;
+  }
+  draw_text(renderer, "RAM  WRITES USE CPU BUS", 300, 150, 1,
+            (SDL_Color){255, 240, 180, 255});
+  if (view->searching)
+    snprintf(line, sizeof line, "%s DECIMAL [%s]",
+             view->search_refine ? "REFINE" : "SEARCH", view->search);
+  else
+    snprintf(line, sizeof line, "VALUE SEARCH  MATCHES %lu  %u-BYTE",
+             (unsigned long)view->match_count, view->search_width ? view->search_width : 1);
+  draw_text(renderer, line, 300, 168, 1, (SDL_Color){235, 245, 240, 255});
+  draw_button(renderer, (SDL_Rect){300, 400, 92, 22}, 0, 0);
+  draw_text(renderer, "SEARCH", 310, 406, 1,
+            (SDL_Color){235, 245, 240, 255});
+  draw_button(renderer, (SDL_Rect){400, 400, 92, 22}, view->match_count != 0, 0);
+  draw_text(renderer, "REFINE", 412, 406, 1,
+            (SDL_Color){235, 245, 240, 255});
+  draw_button(renderer, (SDL_Rect){500, 400, 92, 22}, view->match_count != 0, 0);
+  draw_text(renderer, "NEXT", 518, 406, 1,
+            (SDL_Color){235, 245, 240, 255});
+  draw_button(renderer, (SDL_Rect){300, 428, 92, 22}, view->match_count != 0, 0);
+  draw_text(renderer, "CHANGED", 306, 434, 1,
+            (SDL_Color){235, 245, 240, 255});
+  draw_button(renderer, (SDL_Rect){400, 428, 92, 22}, view->match_count != 0, 0);
+  draw_text(renderer, "SAME", 422, 434, 1,
+            (SDL_Color){235, 245, 240, 255});
+  draw_text(renderer, "RESULTS  DECIMAL BASE 10", 20, 280, 1,
+            (SDL_Color){255, 240, 180, 255});
+  {
+    unsigned shown = 0;
+    for (unsigned address = 0; address <= 0xffffu && shown < 8; address++) {
+      if (!view->matches[address])
+        continue;
+      uint8_t low = gb_dbg_read(gb, (uint16_t)address);
+      uint8_t high = view->search_width == 2 && address != 0xffffu
+                         ? gb_dbg_read(gb, (uint16_t)(address + 1))
+                         : 0;
+      if (view->search_width == 2)
+        snprintf(line, sizeof line, "%c%04X  %02X %02X  LE %u  BE %u",
+                 view->selected && view->selected_address == address ? '>' : ' ',
+                 address, low, high, (unsigned)(low | high << 8),
+                 (unsigned)(low << 8 | high));
+      else
+        snprintf(line, sizeof line, "%c%04X  %02X  DEC %u",
+                 view->selected && view->selected_address == address ? '>' : ' ',
+                 address, low, (unsigned)low);
+      draw_text(renderer, line, 20, 300 + (int)shown * 16, 1,
+                (SDL_Color){235, 245, 240, 255});
+      shown++;
+    }
+    if (view->match_count > shown)
+      draw_text(renderer, "... NEXT FOR MORE", 20, 300 + (int)shown * 16, 1,
+                (SDL_Color){180, 195, 205, 255});
+  }
+  for (unsigned row = 0; row < 8; row++) {
+    uint16_t row_address = (uint16_t)(view->base + row * 16);
+    snprintf(line, sizeof line, "%04X", row_address);
+    draw_text(renderer, line, 300, 190 + (int)row * 22, 1,
+              (SDL_Color){180, 195, 205, 255});
+    for (unsigned col = 0; col < 16; col++) {
+      uint16_t address = (uint16_t)(row_address + col);
+      uint8_t value = gb_dbg_read(gb, address);
+      int x = 340 + (int)col * 17;
+      int y = 190 + (int)row * 22;
+      if (view->selected && address == view->selected_address) {
+        SDL_SetRenderDrawColor(renderer, 180, 120, 30, 255);
+        SDL_RenderFillRect(renderer, &(SDL_Rect){x - 1, y - 1, 15, 13});
+      }
+      snprintf(line, sizeof line, "%c%c", hex_digit(value >> 4),
+               hex_digit(value & 15));
+      draw_text(renderer, line, x, y, 1,
+                (SDL_Color){235, 245, 240, 255});
+    }
+  }
+  if (view->edit_len) {
+    snprintf(line, sizeof line, "EDIT %04X [%s] ENTER WRITE  ESC CANCEL",
+             view->selected_address, view->edit);
+    draw_text(renderer, line, 300, 380, 1,
+              (SDL_Color){255, 210, 120, 255});
+  } else {
+    draw_text(renderer, "CLICK BYTE  TYPE HEX  ENTER WRITE", 300, 380, 1,
+              (SDL_Color){190, 205, 215, 255});
+  }
+}
+
+static int debug_memory_at(int x, int y, uint16_t base, uint16_t *address) {
+  if (x < 340 || x >= 612 || y < 190 || y >= 366)
+    return 0;
+  unsigned col = (unsigned)(x - 340) / 17;
+  unsigned row = (unsigned)(y - 190) / 22;
+  if (col >= 16 || row >= 8)
+    return 0;
+  *address = (uint16_t)(base + row * 16 + col);
+  return 1;
+}
+
+static int debug_search_button_at(int x, int y, int refine) {
+  int left;
+  int top;
+  if (refine <= 2) {
+    left = refine == 0 ? 300 : refine == 1 ? 400 : 500;
+    top = 400;
+  } else {
+    left = refine == 3 ? 300 : 400;
+    top = 428;
+  }
+  return x >= left && x < left + 92 && y >= top && y < top + 22;
+}
+
+static int debug_result_at(const debug_view_t *view, int x, int y,
+                           uint16_t *address) {
+  unsigned wanted;
+  if (x < 20 || x >= 180 || y < 300 || y >= 428)
+    return 0;
+  wanted = (unsigned)(y - 300) / 16;
+  for (unsigned candidate = 0; candidate <= 0xffffu; candidate++) {
+    if (!view->matches[candidate])
+      continue;
+    if (wanted == 0) {
+      *address = (uint16_t)candidate;
+      return 1;
+    }
+    wanted--;
+  }
+  return 0;
+}
+
+static void debug_edit_key(debug_view_t *view, SDL_Keycode key) {
+  int value = hex_value(key);
+  if (value < 0)
+    return;
+  if (view->searching && value >= 0 && value <= 9 && view->search_len < 5) {
+    view->search[view->search_len++] = (char)('0' + value);
+    view->search[view->search_len] = '\0';
+  } else if (!view->searching && view->edit_len < 2) {
+    view->edit[view->edit_len++] = hex_digit((unsigned)value);
+    view->edit[view->edit_len] = '\0';
+  }
+}
+
+static void debug_scan_value(gb_t *gb, debug_view_t *view) {
+  unsigned value = 0;
+  unsigned width;
+  size_t new_count = 0;
+  size_t first = 0;
+  int found = 0;
+  if (!view->search_len)
+    return;
+  for (unsigned i = 0; i < view->search_len; i++)
+    value = value * 10u + (unsigned)(view->search[i] - '0');
+  if (value > 65535u)
+    return;
+  width = value > 255u ? 2u : 1u;
+  view->search_width = width;
+  if (!view->search_refine) {
+    memset(view->matches, 0, sizeof view->matches);
+  }
+  for (unsigned address = 0; address + width <= 0x10000u; address++) {
+    if (view->search_refine && !view->matches[address])
+      continue;
+    uint16_t low = gb_dbg_read(gb, (uint16_t)address);
+    int matches_value = low == value;
+    if (width == 2) {
+      uint16_t high = gb_dbg_read(gb, (uint16_t)(address + 1));
+      uint16_t little_endian = (uint16_t)(low | (high << 8));
+      uint16_t big_endian = (uint16_t)((low << 8) | high);
+      matches_value = little_endian == value || big_endian == value;
+    }
+    if (matches_value) {
+      view->matches[address] = 1;
+      new_count++;
+      if (!found) {
+        first = address;
+        found = 1;
+      }
+    } else {
+      view->matches[address] = 0;
+    }
+  }
+  for (unsigned address = 0; address + width <= 0x10000u; address++) {
+    if (view->matches[address]) {
+      view->snapshot[address] = gb_dbg_read(gb, (uint16_t)address);
+      if (width == 2)
+        view->snapshot[address + 1] =
+            gb_dbg_read(gb, (uint16_t)(address + 1));
+    }
+  }
+  view->match_count = new_count;
+  if (found) {
+    view->base = (uint16_t)(first & 0xfff0u);
+    view->selected_address = (uint16_t)first;
+    view->selected = 1;
+  }
+  view->searching = 0;
+  view->search_refine = 0;
+  view->search_len = 0;
+  view->search[0] = '\0';
+}
+
+static void debug_scan_changed(gb_t *gb, debug_view_t *view, int same) {
+  size_t count = 0;
+  size_t first = 0;
+  int found = 0;
+  unsigned width = view->search_width ? view->search_width : 1;
+  for (unsigned address = 0; address + width <= 0x10000u; address++) {
+    if (!view->matches[address])
+      continue;
+    uint16_t value = gb_dbg_read(gb, (uint16_t)address);
+    uint16_t old = view->snapshot[address];
+    if (width == 2) {
+      value |= (uint16_t)gb_dbg_read(gb, (uint16_t)(address + 1)) << 8;
+      old |= (uint16_t)view->snapshot[address + 1] << 8;
+    }
+    if ((value == old) != same) {
+      view->matches[address] = 0;
+      continue;
+    }
+    view->snapshot[address] = (uint8_t)value;
+    if (width == 2)
+      view->snapshot[address + 1] = (uint8_t)(value >> 8);
+    count++;
+    if (!found) {
+      first = address;
+      found = 1;
+    }
+  }
+  view->match_count = count;
+  if (found) {
+    view->base = (uint16_t)(first & 0xfff0u);
+    view->selected_address = (uint16_t)first;
+    view->selected = 1;
+  }
+}
+
+static void debug_next_match(debug_view_t *view) {
+  if (!view->match_count)
+    return;
+  unsigned start = view->selected ? (unsigned)view->selected_address + 1u : 0u;
+  for (unsigned offset = 0; offset <= 0xffffu; offset++) {
+    unsigned address = (start + offset) & 0xffffu;
+    if (view->matches[address]) {
+      view->selected_address = (uint16_t)address;
+      view->selected = 1;
+      view->base = (uint16_t)(address & 0xfff0u);
+      return;
+    }
+  }
 }
 
 static void draw_controller(SDL_Renderer *renderer, uint8_t buttons,
@@ -594,8 +919,10 @@ int main(int argc, char **argv) {
   SDL_AudioDeviceID audio_device = 0;
   audio_context_t audio_context = {0, 100};
   settings_t settings = {0};
+  debug_view_t debug_view = {0};
   settings.remapping = -1;
   settings.state_slot = 0;
+  debug_view.base = 0xc000;
   SDL_Keycode keys[8] = {SDLK_RIGHT, SDLK_LEFT, SDLK_UP, SDLK_DOWN,
                          SDLK_z, SDLK_x, SDLK_LSHIFT, SDLK_RETURN};
   int running = 1, paused = debug, debug_overlay = 0;
@@ -680,11 +1007,9 @@ int main(int argc, char **argv) {
     char slot_path[4096];
     if (state_slot_path(state_path, settings.state_slot, slot_path,
                         sizeof slot_path) == 0) {
-      file = read_file(slot_path, &file_size);
-      if (file) {
-        if (file_size == state_size) gb_load_state(gb, file, file_size);
-        free(file);
-      }
+      if (state_slot_exists(state_path, settings.state_slot) &&
+          load_state_file(gb, slot_path, state_size) != 0)
+        settings.state_error = 1;
     }
   }
   if (SDL_Init(SDL_INIT_VIDEO | SDL_INIT_EVENTS | SDL_INIT_AUDIO)) {
@@ -835,14 +1160,11 @@ int main(int argc, char **argv) {
               } else if (state_slot_path(state_path, settings.state_slot, slot_path,
                                          sizeof slot_path) == 0) {
                 if (settings.confirm_action == 2) {
-                  save_state(gb, slot_path, state, state_size);
+                  settings.state_error =
+                      save_state(gb, slot_path, state, state_size) != 0;
                 } else {
-                  file = read_file(slot_path, &file_size);
-                  if (file) {
-                    if (file_size == state_size)
-                      gb_load_state(gb, file, file_size);
-                    free(file);
-                  }
+                  settings.state_error =
+                      load_state_file(gb, slot_path, state_size) != 0;
                 }
               }
               settings.confirm_action = 0;
@@ -949,6 +1271,99 @@ int main(int argc, char **argv) {
           gb_set_input(gb, buttons);
         }
       }
+      if (debug_overlay && event.type == SDL_MOUSEBUTTONDOWN &&
+          event.button.button == SDL_BUTTON_LEFT) {
+        uint16_t address;
+        if (debug_search_button_at(event.button.x, event.button.y, 0)) {
+          debug_view.searching = 1;
+          debug_view.search_refine = 0;
+          debug_view.search_len = 0;
+          debug_view.search[0] = '\0';
+          continue;
+        }
+        if (debug_view.match_count &&
+            debug_search_button_at(event.button.x, event.button.y, 1)) {
+          debug_view.searching = 1;
+          debug_view.search_refine = 1;
+          debug_view.search_len = 0;
+          debug_view.search[0] = '\0';
+          continue;
+        }
+        if (debug_view.match_count &&
+            debug_search_button_at(event.button.x, event.button.y, 2)) {
+          debug_next_match(&debug_view);
+          continue;
+        }
+        if (debug_view.match_count &&
+            debug_search_button_at(event.button.x, event.button.y, 3)) {
+          debug_scan_changed(gb, &debug_view, 0);
+          continue;
+        }
+        if (debug_view.match_count &&
+            debug_search_button_at(event.button.x, event.button.y, 4)) {
+          debug_scan_changed(gb, &debug_view, 1);
+          continue;
+        }
+        if (debug_result_at(&debug_view, event.button.x, event.button.y,
+                            &address)) {
+          debug_view.selected_address = address;
+          debug_view.selected = 1;
+          debug_view.base = (uint16_t)(address & 0xfff0u);
+          debug_view.edit_len = 0;
+          debug_view.edit[0] = '\0';
+          continue;
+        }
+        if (debug_memory_at(event.button.x, event.button.y, debug_view.base,
+                            &address)) {
+          debug_view.selected_address = address;
+          debug_view.selected = 1;
+          debug_view.edit_len = 0;
+          debug_view.edit[0] = '\0';
+        }
+        continue;
+      }
+      if (debug_overlay && event.type == SDL_KEYDOWN) {
+        SDL_Keycode key = event.key.keysym.sym;
+        if (key == SDLK_ESCAPE) {
+          debug_overlay = 0;
+          paused = debug;
+        } else if (key == SDLK_s && !debug_view.searching) {
+          gb_dbg_step(gb);
+        } else if (key == SDLK_PAGEUP && !debug_view.searching) {
+          debug_view.base = (uint16_t)(debug_view.base - 128);
+        } else if (key == SDLK_PAGEDOWN && !debug_view.searching) {
+          debug_view.base = (uint16_t)(debug_view.base + 128);
+        } else if (key == SDLK_n && !debug_view.searching) {
+          debug_next_match(&debug_view);
+        } else if (key == SDLK_SLASH && !debug_view.edit_len) {
+          debug_view.searching = 1;
+          debug_view.search_len = 0;
+          debug_view.search[0] = '\0';
+          } else if (key == SDLK_RETURN || key == SDLK_KP_ENTER) {
+          if (debug_view.searching && debug_view.search_len) {
+            debug_scan_value(gb, &debug_view);
+          } else if (debug_view.selected && debug_view.edit_len == 2) {
+            unsigned value = (unsigned)(hex_char_value(debug_view.edit[0]) * 16 +
+                                        hex_char_value(debug_view.edit[1]));
+            gb_dbg_write(gb, debug_view.selected_address, (uint8_t)value);
+            debug_view.edit_len = 0;
+            debug_view.edit[0] = '\0';
+          }
+        } else if (key == SDLK_BACKSPACE) {
+          if (debug_view.searching && debug_view.search_len) {
+            debug_view.search[--debug_view.search_len] = '\0';
+          } else if (debug_view.edit_len) {
+            debug_view.edit[--debug_view.edit_len] = '\0';
+          }
+        } else if (key == SDLK_ESCAPE) {
+          debug_view.searching = 0;
+          debug_view.search_len = 0;
+          debug_view.edit_len = 0;
+        } else {
+          debug_edit_key(&debug_view, key);
+        }
+        continue;
+      }
       if (event.type == SDL_MOUSEBUTTONUP &&
           event.button.button == SDL_BUTTON_LEFT) {
         int button = controller_button_at(event.button.x, event.button.y);
@@ -976,17 +1391,14 @@ int main(int argc, char **argv) {
         char slot_path[4096];
         if (state_slot_path(state_path, settings.state_slot, slot_path,
                             sizeof slot_path) == 0)
-          save_state(gb, slot_path, state, state_size);
+          settings.state_error = save_state(gb, slot_path, state, state_size) != 0;
       }
       if (event.type == SDL_KEYDOWN && event.key.keysym.sym == SDLK_F8) {
         char slot_path[4096];
-        if (state_slot_path(state_path, settings.state_slot, slot_path,
-                            sizeof slot_path) == 0) {
-          file = read_file(slot_path, &file_size);
-          if (file) {
-            if (file_size == state_size) gb_load_state(gb, file, file_size);
-            free(file);
-          }
+          if (state_slot_path(state_path, settings.state_slot, slot_path,
+                              sizeof slot_path) == 0) {
+          settings.state_error =
+              load_state_file(gb, slot_path, state_size) != 0;
         }
       }
     }
@@ -1030,7 +1442,7 @@ int main(int argc, char **argv) {
         (autosave_timer += emulated_frames) >= autosave_frames[settings.autosave]) {
       char auto_path[4096];
       if (state_slot_path(state_path, 5, auto_path, sizeof auto_path) == 0)
-        save_state(gb, auto_path, state, state_size);
+        settings.state_error = save_state(gb, auto_path, state, state_size) != 0;
       autosave_timer = 0;
     }
     SDL_UpdateTexture(texture, NULL, gb_framebuffer(gb), 160 * 4);
@@ -1045,7 +1457,7 @@ int main(int argc, char **argv) {
     SDL_Rect game_rect = {0, 0, 640, 576};
     SDL_RenderCopy(renderer, texture, NULL, &game_rect);
     if (debug_overlay)
-      draw_debug_overlay(renderer, gb);
+      draw_debug_overlay(renderer, gb, &debug_view);
     draw_controller(renderer, buttons, settings.remapping);
     if (settings.open)
       draw_settings(renderer, &settings, audio_context.volume, save_path,

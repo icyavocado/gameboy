@@ -20,6 +20,7 @@ typedef struct {
   int confirm_action;
   int autosave;
   int config_error;
+  int state_error;
   int dirty;
   unsigned save_slot;
   unsigned state_slot;
