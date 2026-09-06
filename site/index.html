@@ -30,7 +30,16 @@
   #gamepad { display: none; width: min(92vw, 360px); margin: 18px auto; }
   .pad-row { display: flex; justify-content: space-between; align-items: center; margin: 8px 0; }
   .pad-cluster { display: flex; align-items: center; gap: 6px; }
-  .pad-button { width: 64px; height: 52px; padding: 0; font-size: 1.1rem;
+  .dpad { display: grid; grid-template-columns: repeat(3, 52px); grid-template-rows: repeat(3, 52px); gap: 2px; }
+  .dpad .up { grid-column: 2; grid-row: 1; }
+  .dpad .left { grid-column: 1; grid-row: 2; }
+  .dpad .right { grid-column: 3; grid-row: 2; }
+  .dpad .down { grid-column: 2; grid-row: 3; }
+  .pad-actions { position: relative; width: 152px; height: 116px; }
+  .pad-actions .b { position: absolute; left: 0; bottom: 0; }
+  .pad-actions .a { position: absolute; right: 0; top: 0; }
+  .center-controls { justify-content: center; gap: 12px; }
+  .pad-button { width: 52px; height: 52px; padding: 0; font-size: 1.1rem;
     border-radius: 8px; touch-action: none; user-select: none; }
   .pad-button.action { border-radius: 50%; width: 62px; height: 62px; }
   .pad-button:active, .pad-button.held { background: #5c987f; }
@@ -47,18 +56,18 @@
 <div class="row"><canvas id="screen" width="160" height="144"></canvas></div>
 <div id="gamepad" aria-label="Game Boy controls">
   <div class="pad-row">
-    <div class="pad-cluster">
-      <button class="pad-button" data-bit="4" aria-label="Up">&#9650;</button>
-      <button class="pad-button" data-bit="8" aria-label="Down">&#9660;</button>
-      <button class="pad-button" data-bit="2" aria-label="Left">&#9664;</button>
-      <button class="pad-button" data-bit="1" aria-label="Right">&#9654;</button>
+    <div class="dpad">
+      <button class="pad-button up" data-bit="4" aria-label="Up">&#9650;</button>
+      <button class="pad-button down" data-bit="8" aria-label="Down">&#9660;</button>
+      <button class="pad-button left" data-bit="2" aria-label="Left">&#9664;</button>
+      <button class="pad-button right" data-bit="1" aria-label="Right">&#9654;</button>
     </div>
-    <div class="pad-cluster">
-      <button class="pad-button action" data-bit="32" aria-label="B">B</button>
-      <button class="pad-button action" data-bit="16" aria-label="A">A</button>
+    <div class="pad-actions">
+      <button class="pad-button action b" data-bit="32" aria-label="B">B</button>
+      <button class="pad-button action a" data-bit="16" aria-label="A">A</button>
     </div>
   </div>
-  <div class="pad-row">
+  <div class="pad-row center-controls">
     <div class="pad-cluster">
       <button class="pad-button" data-bit="64" aria-label="Select">Select</button>
       <button class="pad-button" data-bit="128" aria-label="Start">Start</button>
