@@ -822,6 +822,25 @@ UTEST(core, battery_ram_round_trip) {
   gb_destroy(g);
 }
 
+UTEST(core, battery_ram_survives_reset) {
+  static uint8_t rom[0x8000];
+  uint8_t save[0x2000];
+  memset(rom, 0, sizeof rom);
+  rom[0x147] = 3;
+  rom[0x149] = 2;
+  gb_t *g = gb_create();
+  ASSERT_EQ(gb_load_rom(g, rom, sizeof rom), 0);
+  gb_dbg_write(g, 0x0000, 0x0a);
+  gb_dbg_write(g, 0xa123, 0x5a);
+  ASSERT_EQ(gb_save_ram(g, save), sizeof save);
+  /* SDL load path: gb_load_ram followed by gb_reset; RAM must survive. */
+  gb_dbg_write(g, 0xa123, 0xa5);
+  ASSERT_EQ(gb_load_ram(g, save, sizeof save), 0);
+  gb_reset(g);
+  ASSERT_EQ(gb_dbg_read(g, 0xa123), 0x5a);
+  gb_destroy(g);
+}
+
 UTEST(core, save_state_round_trip) {
   gb_t *g = load((const uint8_t[]){0x06, 0x42, 0x76}, 3);
   gb_dbg_write(g, 0x8000, 0x9a);
@@ -1065,6 +1084,7 @@ int main(void) {
   ppu_lcd_timing_and_interrupts();
   ppu_sprite_rendering();
   core_battery_ram_round_trip();
+  core_battery_ram_survives_reset();
   core_save_state_round_trip();
   core_apu_square_channel();
   core_apu_wave_and_noise_channels();
@@ -1077,6 +1097,6 @@ int main(void) {
   core_oam_dma_transfer();
   core_timer_uses_divider_edges();
   ppu_stat_write_rechecks_coincidence();
-  puts("26 tests passed");
+  puts("27 tests passed");
   return 0;
 }

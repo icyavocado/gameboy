@@ -22,7 +22,7 @@
 1. **Core is a pure, platform-free library (`libgb`).** No SDL, no stdio for I/O, no globals. All state lives in a `gb_t` struct. This enables WASM, tests, the debugger and save states.
 2. **Frontends are thin.** SDL2 desktop, Emscripten/WASM, headless test runner. They call `gb_run_frame()`, read the framebuffer, consume audio samples, feed input.
 3. **Cycle-driven design.** CPU executes one instruction and reports T-cycles; PPU/APU/timer/DMA/serial are then advanced by that many cycles. Accurate enough for Mooneye tests and dmg-acid2/cgb-acid2. A per-M-cycle refactor is possible later but not planned.
-4. **Save states are `memcpy` of `gb_t` plus a version header.** `gb_t` must contain no pointers and only fixed-width types. ROM and cart RAM are stored separately and rehydrated on load.
+4. **Save states are field-wise serialization of `gb_t` plus a version header.** `gb_t` uses only fixed-width types for emulated state (ROM/RAM/boot-blob pointers are owned handles, never serialized); ROM and cart RAM are stored separately and rehydrated on load.
 5. **Debug hook.** CPU calls `gb_dbg_before_instr()` before each instruction when debugging is enabled; compiles to nothing otherwise.
 
 ## 3. Toolchain (verified on dev machine)

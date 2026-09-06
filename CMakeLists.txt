@@ -20,7 +20,7 @@ target_compile_options(gb-link PRIVATE -Wall -Wextra -Werror)
 find_package(PkgConfig REQUIRED)
 pkg_check_modules(SDL2 REQUIRED sdl2)
 add_executable(gb-sdl src/frontend/sdl/main.c src/frontend/sdl/input.c
-  src/frontend/sdl/ui_assets.c)
+  src/frontend/sdl/ui_assets.c src/frontend/sdl/config.c)
 target_include_directories(gb-sdl PRIVATE ${SDL2_INCLUDE_DIRS})
 target_link_libraries(gb-sdl PRIVATE gb ${SDL2_LIBRARIES})
 target_compile_options(gb-sdl PRIVATE -Wall -Wextra -Werror ${SDL2_CFLAGS_OTHER})

@@ -3,7 +3,8 @@
 #include <stdlib.h>
 #include <string.h>
 
-/* Invalid SM83 opcodes are intentionally treated as NOPs in Phase 1. */
+/* Invalid SM83 opcodes execute as 4-cycle NOPs; with debugging enabled they
+   are also reported on stderr to fail loudly instead of hiding decoder gaps. */
 #define STATE_VERSION 11u
 #define STATE_HEADER_SIZE 24u
 #define MAX_BREAKPOINTS 16u
@@ -1488,6 +1489,9 @@ int gb_dbg_step(gb_t *g) {
       push(g, g->pc);
       g->pc = y * 8;
       c = 16;
+    } else if (g->debug_enabled) {
+      fprintf(stderr, "gb: invalid opcode %02x at %04x\n", o,
+              (uint16_t)(g->pc - 1));
     }
     break;
   }
