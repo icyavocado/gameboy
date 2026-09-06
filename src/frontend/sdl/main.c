@@ -599,6 +599,7 @@ int main(int argc, char **argv) {
   SDL_Keycode keys[8] = {SDLK_RIGHT, SDLK_LEFT, SDLK_UP, SDLK_DOWN,
                          SDLK_z, SDLK_x, SDLK_LSHIFT, SDLK_RETURN};
   int running = 1, paused = debug, debug_overlay = 0;
+  int command_line_rom = 0;
   unsigned save_timer = 0, autosave_timer = 0;
   uint8_t buttons = 0;
 
@@ -615,13 +616,15 @@ int main(int argc, char **argv) {
       break;
     }
   }
-  if (path[0])
+  command_line_rom = path[0] != '\0';
+  if (command_line_rom)
     config_paths(path, main_config_path, sizeof main_config_path,
                  config_path, sizeof config_path);
   else
     snprintf(main_config_path, sizeof main_config_path, "gameboy.cfg");
+  /* An explicit ROM argument must win over a persisted LOADROM setting. */
   load_config(main_config_path, path, sizeof path, &settings,
-              &audio_context.volume, keys, 1);
+              &audio_context.volume, keys, !command_line_rom);
   if (!path[0]) {
     fprintf(stderr, "usage: %s [--debug] [--boot-rom FILE] ROM\n", argv[0]);
     return 2;
