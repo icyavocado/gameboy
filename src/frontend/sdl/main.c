@@ -339,6 +339,8 @@ static int config_speed(const char *value) {
       strcasecmp(value, "1x") == 0) return 0;
   if (strcmp(value, "2") == 0 || strcasecmp(value, "2x") == 0) return 1;
   if (strcmp(value, "3") == 0 || strcasecmp(value, "3x") == 0) return 2;
+  if (strcmp(value, "4") == 0 || strcasecmp(value, "4x") == 0) return 3;
+  if (strcmp(value, "5") == 0 || strcasecmp(value, "5x") == 0) return 4;
   return -1;
 }
 
@@ -405,7 +407,8 @@ static int write_config(const char *filename, const char *rom_path,
           settings->save_slot + 1, state_config_value(settings), volume,
           settings->palette);
   fprintf(file, "SPEED %s\nAUTOSAVE %s\nREMAPKEYS",
-          settings->speed == 0 ? "1x" : settings->speed == 1 ? "2x" : "3x",
+          settings->speed == 0 ? "1x" : settings->speed == 1 ? "2x" :
+          settings->speed == 2 ? "3x" : settings->speed == 3 ? "4x" : "5x",
           autosave_names[settings->autosave]);
   for (unsigned i = 0; i < 8; i++)
     fprintf(file, " %s", config_key_name(keys[i]));
@@ -490,7 +493,7 @@ static void draw_settings(SDL_Renderer *renderer, const settings_t *settings,
         SDL_SetRenderDrawColor(renderer, bar < volume / 10 ? 120 : 45,
                                bar < volume / 10 ? 220 : 55,
                                bar < volume / 10 ? 190 : 65, 255);
-        SDL_Rect meter = {405 + (int)bar * 12, y - 2, 9, 16};
+        SDL_Rect meter = {411 + (int)bar * 12, y - 2, 9, 16};
         SDL_RenderFillRect(renderer, &meter);
       }
     } else if (i == 5) {
@@ -499,7 +502,7 @@ static void draw_settings(SDL_Renderer *renderer, const settings_t *settings,
       draw_text_right(renderer, value, 528, y, 2,
                       (SDL_Color){180, 230, 210, 255});
     } else if (i == 6) {
-      static const char *const speeds[] = {"OFF", "2X", "3X"};
+      static const char *const speeds[] = {"OFF", "2X", "3X", "4X", "5X"};
       draw_text_right(renderer, speeds[settings->speed], 528, y, 2,
                       (SDL_Color){180, 230, 210, 255});
     } else if (i == 7) {
@@ -510,7 +513,7 @@ static void draw_settings(SDL_Renderer *renderer, const settings_t *settings,
     } else if (i >= 1 && i <= 3) {
       unsigned slot_count = i == 1 ? 5 : 6;
       unsigned selected_slot = i == 1 ? settings->save_slot : settings->state_slot;
-      int start_x = slot_count == 6 ? 258 : 300;
+      int start_x = slot_count == 6 ? 285 : 327;
       for (unsigned display_slot = 0; display_slot < slot_count; display_slot++) {
         unsigned slot = i >= 2 && display_slot == 0 ? 5 :
                         i >= 2 ? display_slot - 1 : display_slot;
@@ -1041,7 +1044,7 @@ int main(int argc, char **argv) {
             settings.speed--;
             persist_config(main_config_path, config_path, path, &settings,
                            audio_context.volume, keys);
-          } else if (key == SDLK_RIGHT && settings.selected == 6 && settings.speed < 2) {
+          } else if (key == SDLK_RIGHT && settings.selected == 6 && settings.speed < 4) {
             settings.speed++;
             persist_config(main_config_path, config_path, path, &settings,
                            audio_context.volume, keys);
@@ -1067,7 +1070,7 @@ int main(int argc, char **argv) {
             persist_config(main_config_path, config_path, path, &settings,
                            audio_context.volume, keys);
           } else if ((key == SDLK_RETURN || key == SDLK_KP_ENTER) && settings.selected == 6) {
-            settings.speed = (settings.speed + 1) % 3;
+            settings.speed = (settings.speed + 1) % 5;
             persist_config(main_config_path, config_path, path, &settings,
                            audio_context.volume, keys);
           } else if ((key == SDLK_RETURN || key == SDLK_KP_ENTER) && settings.selected == 7) {
