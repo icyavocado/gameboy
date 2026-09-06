@@ -41,14 +41,29 @@ static uint8_t *read_file(const char *path, size_t *size) {
   return data;
 }
 
-static void save_ram(const gb_t *gb, const char *path) {
+static int save_ram(const gb_t *gb, const char *path) {
   size_t size = gb_save_ram_size(gb);
   uint8_t *data = size ? malloc(size) : NULL;
+  int result = -1;
   if (size && data) {
     gb_save_ram(gb, data);
-    write_file(path, data, size);
+    result = write_file(path, data, size);
   }
   free(data);
+  return result;
+}
+
+static int load_ram(gb_t *gb, const char *path) {
+  size_t size;
+  uint8_t *data = read_file(path, &size);
+  int result;
+  if (!data)
+    return -1;
+  result = gb_load_ram(gb, data, size);
+  free(data);
+  if (result == 0)
+    gb_reset(gb);
+  return result;
 }
 
 static void save_state(const gb_t *gb, const char *path, uint8_t *buffer,
@@ -59,6 +74,10 @@ static void save_state(const gb_t *gb, const char *path, uint8_t *buffer,
 
 static int state_slot_path(const char *base, unsigned slot, char *path,
                            size_t size) {
+  if (slot == 5)
+    return snprintf(path, size, "%s.auto", base) < (int)size ? 0 : -1;
+  if (slot == 0)
+    return snprintf(path, size, "%s", base) < (int)size ? 0 : -1;
   return snprintf(path, size, "%s%u", base, slot + 1) < (int)size ? 0 : -1;
 }
 
@@ -71,6 +90,8 @@ static int state_slot_exists(const char *base, unsigned slot) {
 
 static int save_slot_path(const char *base, unsigned slot, char *path,
                           size_t size) {
+  if (slot == 0)
+    return snprintf(path, size, "%s", base) < (int)size ? 0 : -1;
   return snprintf(path, size, "%s%u", base, slot + 1) < (int)size ? 0 : -1;
 }
 
@@ -234,8 +255,12 @@ typedef struct {
   int selected;
   int remapping;
   int palette;
+  int speed;
   int browser;
   int confirm_load;
+  int confirm_action;
+  int autosave;
+  unsigned save_slot;
   unsigned state_slot;
   rom_entry_t *roms;
   size_t rom_count;
@@ -247,6 +272,7 @@ static void open_settings(settings_t *settings, int debug) {
   settings->selected = 0;
   settings->browser = 0;
   settings->confirm_load = 0;
+  settings->confirm_action = 0;
   free_roms(settings->roms, settings->rom_count);
   settings->roms = NULL;
   settings->rom_count = 0;
@@ -255,8 +281,9 @@ static void open_settings(settings_t *settings, int debug) {
 }
 
 static const char *setting_names[] = {
-    "LOAD ROM", "SAVE", "LOAD SAVE", "SAVE STATE", "LOAD STATE",
-    "VOLUME", "CHANGE PALETTE", "REMAP KEYS", "RESET", "CLOSE"};
+    "LOAD ROM", "SAVE SLOT", "SAVE STATE", "LOAD STATE", "VOLUME",
+    "CHANGE PALETTE", "SPEED", "AUTO SAVE", "REMAP KEYS", "RESET", "CLOSE",
+    "QUIT"};
 
 static void draw_settings(SDL_Renderer *renderer, const settings_t *settings,
                           unsigned volume, const char *save_path,
@@ -312,7 +339,7 @@ static void draw_settings(SDL_Renderer *renderer, const settings_t *settings,
     SDL_RenderFillRect(renderer, &row);
     draw_text(renderer, setting_names[i], 112, y, 2,
               (SDL_Color){235, 245, 240, 255});
-    if (i == 5) {
+    if (i == 4) {
       for (unsigned bar = 0; bar < 10; bar++) {
         SDL_SetRenderDrawColor(renderer, bar < volume / 10 ? 120 : 45,
                                bar < volume / 10 ? 220 : 55,
@@ -320,28 +347,57 @@ static void draw_settings(SDL_Renderer *renderer, const settings_t *settings,
         SDL_Rect meter = {405 + (int)bar * 12, y - 2, 9, 16};
         SDL_RenderFillRect(renderer, &meter);
       }
-    } else if (i == 6) {
+    } else if (i == 5) {
       static const char *const palettes[] = {"NONE", "GREEN", "SEPIA"};
       const char *value = palettes[settings->palette];
       draw_text(renderer, value, 455, y, 2, (SDL_Color){180, 230, 210, 255});
-    } else if (i >= 1 && i <= 4) {
-      for (unsigned slot = 0; slot < 5; slot++) {
-        int x = 300 + (int)slot * 42;
-        int active = slot == settings->state_slot;
-        int exists = i <= 2 ? save_slot_exists(save_path, slot)
+    } else if (i == 6) {
+      static const char *const speeds[] = {"OFF", "2X", "3X"};
+      draw_text(renderer, speeds[settings->speed], 455, y, 2,
+                (SDL_Color){180, 230, 210, 255});
+    } else if (i == 7) {
+      static const char *const autosaves[] = {"OFF", "5S", "10S", "30S",
+                                              "1M", "5M", "30M"};
+      draw_text(renderer, autosaves[settings->autosave], 455, y, 2,
+                (SDL_Color){180, 230, 210, 255});
+    } else if (i >= 1 && i <= 3) {
+      unsigned slot_count = i == 1 ? 5 : 6;
+      unsigned selected_slot = i == 1 ? settings->save_slot : settings->state_slot;
+      int start_x = slot_count == 6 ? 258 : 300;
+      for (unsigned display_slot = 0; display_slot < slot_count; display_slot++) {
+        unsigned slot = i >= 2 && display_slot == 0 ? 5 :
+                        i >= 2 ? display_slot - 1 : display_slot;
+        int x = start_x + (int)display_slot * 42;
+        int active = slot == selected_slot;
+        int exists = i == 1 ? save_slot_exists(save_path, slot)
                             : state_slot_exists(state_path, slot);
         SDL_SetRenderDrawColor(renderer, exists ? 35 : 18,
                                active ? 100 : exists ? 70 : 28,
                                exists ? 55 : 40, 255);
         SDL_Rect slot_rect = {x - 3, y - 5, 36, 27};
         SDL_RenderFillRect(renderer, &slot_rect);
-        char label[5];
-        snprintf(label, sizeof label, "[%u]", slot + 1);
+        char label[6];
+        if (i >= 2 && slot == 5)
+          snprintf(label, sizeof label, "[A]");
+        else
+          snprintf(label, sizeof label, "[%u]", slot + 1);
         draw_text(renderer, label, x, y, 2,
                   exists ? (SDL_Color){255, 240, 180, 255}
                          : (SDL_Color){150, 160, 165, 255});
       }
     }
+  }
+  if (settings->confirm_action) {
+    SDL_SetRenderDrawColor(renderer, 80, 65, 25, 255);
+    SDL_Rect prompt_box = {100, 465, 440, 38};
+    SDL_RenderFillRect(renderer, &prompt_box);
+    const char *prompt = settings->confirm_action == 1
+                             ? "LOAD SAVE? ENTER YES ESC NO"
+                             : settings->confirm_action == 2
+                                   ? "SAVE STATE? ENTER YES ESC NO"
+                                   : "LOAD STATE? ENTER YES ESC NO";
+    draw_text(renderer, prompt,
+              145, 476, 2, (SDL_Color){255, 240, 180, 255});
   }
   (void)keys;
 }
@@ -551,7 +607,7 @@ int main(int argc, char **argv) {
   SDL_Keycode keys[8] = {SDLK_RIGHT, SDLK_LEFT, SDLK_UP, SDLK_DOWN,
                          SDLK_z, SDLK_x, SDLK_LSHIFT, SDLK_RETURN};
   int running = 1, paused = debug, debug_overlay = 0;
-  unsigned save_timer = 0;
+  unsigned save_timer = 0, autosave_timer = 0;
   uint8_t buttons = 0;
 
   for (int i = 1; i < argc; i++) {
@@ -707,6 +763,8 @@ int main(int argc, char **argv) {
                     free(state);
                     state_size = gb_save_state_size(gb);
                     state = malloc(state_size);
+                    load_ram(gb, save_path);
+                    save_timer = autosave_timer = 0;
                     settings.open = 0;
                     settings.browser = 0;
                     settings.confirm_load = 0;
@@ -730,66 +788,98 @@ int main(int argc, char **argv) {
             settings.remapping++;
             if (settings.remapping == 8)
               settings.remapping = -1;
+          } else if (settings.confirm_action) {
+            if (key == SDLK_ESCAPE || key == SDLK_n) {
+              settings.confirm_action = 0;
+            } else if (key == SDLK_RETURN || key == SDLK_KP_ENTER || key == SDLK_y) {
+              char slot_path[4096];
+              if (settings.confirm_action == 1) {
+                if (save_slot_path(save_path, settings.save_slot, slot_path,
+                                   sizeof slot_path) == 0) {
+                  file = read_file(slot_path, &file_size);
+                  if (file) {
+                    if (gb_load_ram(gb, file, file_size) == 0)
+                      gb_reset(gb);
+                    free(file);
+                  }
+                }
+              } else if (state_slot_path(state_path, settings.state_slot, slot_path,
+                                         sizeof slot_path) == 0) {
+                if (settings.confirm_action == 2) {
+                  save_state(gb, slot_path, state, state_size);
+                } else {
+                  file = read_file(slot_path, &file_size);
+                  if (file) {
+                    if (file_size == state_size)
+                      gb_load_state(gb, file, file_size);
+                    free(file);
+                  }
+                }
+              }
+              settings.confirm_action = 0;
+            }
           } else if (key == SDLK_ESCAPE) {
             settings.open = 0;
             settings.remapping = -1;
             SDL_StopTextInput();
           } else if (key == SDLK_UP && settings.selected > 0) {
             settings.selected--;
-          } else if (key == SDLK_DOWN && settings.selected < 9) {
+          } else if (key == SDLK_DOWN && settings.selected < 11) {
             settings.selected++;
-          } else if (key == SDLK_LEFT && settings.selected >= 1 && settings.selected <= 4 &&
+          } else if (key == SDLK_LEFT && settings.selected == 1 &&
+                     settings.save_slot > 0) {
+            settings.save_slot--;
+          } else if (key == SDLK_RIGHT && settings.selected == 1 &&
+                     settings.save_slot < 4) {
+            settings.save_slot++;
+          } else if (key == SDLK_LEFT && settings.selected >= 2 && settings.selected <= 3 &&
                      settings.state_slot > 0) {
             settings.state_slot--;
-          } else if (key == SDLK_RIGHT && settings.selected >= 1 && settings.selected <= 4 &&
-                     settings.state_slot < 4) {
+          } else if (key == SDLK_RIGHT && settings.selected >= 2 && settings.selected <= 3 &&
+                     settings.state_slot < 5) {
             settings.state_slot++;
-          } else if (key == SDLK_LEFT && settings.selected == 5 && audio_context.volume >= 10) {
+          } else if (key == SDLK_LEFT && settings.selected == 4 && audio_context.volume >= 10) {
             audio_context.volume -= 10;
-          } else if (key == SDLK_RIGHT && settings.selected == 5 && audio_context.volume <= 90) {
+          } else if (key == SDLK_RIGHT && settings.selected == 4 && audio_context.volume <= 90) {
             audio_context.volume += 10;
-          } else if (key == SDLK_LEFT && settings.selected == 6) {
+          } else if (key == SDLK_LEFT && settings.selected == 5) {
             settings.palette = (settings.palette + 2) % 3;
-          } else if (key == SDLK_RIGHT && settings.selected == 6) {
+          } else if (key == SDLK_RIGHT && settings.selected == 5) {
             settings.palette = (settings.palette + 1) % 3;
+          } else if (key == SDLK_LEFT && settings.selected == 6 && settings.speed > 0) {
+            settings.speed--;
+          } else if (key == SDLK_RIGHT && settings.selected == 6 && settings.speed < 2) {
+            settings.speed++;
+          } else if (key == SDLK_LEFT && settings.selected == 7 && settings.autosave > 0) {
+            settings.autosave--;
+          } else if (key == SDLK_RIGHT && settings.selected == 7 && settings.autosave < 6) {
+            settings.autosave++;
           } else if ((key == SDLK_RETURN || key == SDLK_KP_ENTER) && settings.selected == 0) {
             settings.browser = 1;
             settings.rom_selected = 0;
           } else if ((key == SDLK_RETURN || key == SDLK_KP_ENTER) && settings.selected == 1) {
-            char slot_path[4096];
-            if (save_slot_path(save_path, settings.state_slot, slot_path,
-                               sizeof slot_path) == 0)
-              save_ram(gb, slot_path);
+            settings.confirm_action = 1;
           } else if ((key == SDLK_RETURN || key == SDLK_KP_ENTER) && settings.selected == 2) {
-            char slot_path[4096];
-            if (save_slot_path(save_path, settings.state_slot, slot_path,
-                               sizeof slot_path) != 0)
-              continue;
-            file = read_file(slot_path, &file_size);
-            if (file) { gb_load_ram(gb, file, file_size); free(file); }
+            settings.confirm_action = 2;
           } else if ((key == SDLK_RETURN || key == SDLK_KP_ENTER) && settings.selected == 3) {
-            char slot_path[4096];
-            if (state_slot_path(state_path, settings.state_slot, slot_path,
-                                sizeof slot_path) == 0)
-              save_state(gb, slot_path, state, state_size);
-          } else if ((key == SDLK_RETURN || key == SDLK_KP_ENTER) && settings.selected == 4) {
-            char slot_path[4096];
-            if (state_slot_path(state_path, settings.state_slot, slot_path,
-                                sizeof slot_path) != 0)
-              continue;
-            file = read_file(slot_path, &file_size);
-            if (file) { if (file_size == state_size) gb_load_state(gb, file, file_size); free(file); }
-          } else if ((key == SDLK_RETURN || key == SDLK_KP_ENTER) && settings.selected == 6) {
+            settings.confirm_action = 3;
+          } else if ((key == SDLK_RETURN || key == SDLK_KP_ENTER) && settings.selected == 5) {
             settings.palette = (settings.palette + 1) % 3;
+          } else if ((key == SDLK_RETURN || key == SDLK_KP_ENTER) && settings.selected == 6) {
+            settings.speed = (settings.speed + 1) % 3;
           } else if ((key == SDLK_RETURN || key == SDLK_KP_ENTER) && settings.selected == 7) {
-            settings.remapping = 0;
+            settings.autosave = (settings.autosave + 1) % 7;
           } else if ((key == SDLK_RETURN || key == SDLK_KP_ENTER) && settings.selected == 8) {
+            settings.remapping = 0;
+          } else if ((key == SDLK_RETURN || key == SDLK_KP_ENTER) && settings.selected == 9) {
             gb_reset(gb);
             settings.open = 0;
             SDL_StopTextInput();
-          } else if ((key == SDLK_RETURN || key == SDLK_KP_ENTER) && settings.selected == 9) {
+          } else if ((key == SDLK_RETURN || key == SDLK_KP_ENTER) && settings.selected == 10) {
             settings.open = 0;
             SDL_StopTextInput();
+          } else if ((key == SDLK_RETURN || key == SDLK_KP_ENTER) && settings.selected == 11) {
+            running = 0;
           }
         }
         continue;
@@ -865,11 +955,29 @@ int main(int argc, char **argv) {
       refresh();
     }
 #endif
-    if (!paused && !settings.open)
-      gb_run_frame(gb);
-    if (++save_timer == 300) {
-      save_ram(gb, save_path);
-      save_timer = 0;
+    unsigned emulated_frames = 0;
+    if (!paused && !settings.open) {
+      unsigned frames = (unsigned)settings.speed + 1;
+      for (unsigned i = 0; i < frames; i++) {
+        gb_run_frame(gb);
+        emulated_frames++;
+      }
+    }
+    if (emulated_frames && (save_timer += emulated_frames) >= 300) {
+      char slot_path[4096];
+      if (save_slot_path(save_path, settings.save_slot, slot_path,
+                         sizeof slot_path) == 0)
+        save_ram(gb, slot_path);
+      save_timer %= 300;
+    }
+    static const unsigned autosave_frames[] = {0, 300, 600, 1800, 3600,
+                                                18000, 108000};
+    if (emulated_frames && settings.autosave &&
+        (autosave_timer += emulated_frames) >= autosave_frames[settings.autosave]) {
+      char auto_path[4096];
+      if (state_slot_path(state_path, 5, auto_path, sizeof auto_path) == 0)
+        save_state(gb, auto_path, state, state_size);
+      autosave_timer = 0;
     }
     SDL_UpdateTexture(texture, NULL, gb_framebuffer(gb), 160 * 4);
     if (settings.palette == 1)
@@ -889,13 +997,18 @@ int main(int argc, char **argv) {
       draw_settings(renderer, &settings, audio_context.volume, save_path,
                     state_path, keys);
     SDL_RenderPresent(renderer);
-    SDL_Delay(16);
+    SDL_Delay(16 / ((unsigned)settings.speed + 1));
   }
 #ifdef GB_ENABLE_TUI
   if (debug)
     endwin();
 #endif
-  save_ram(gb, save_path);
+  {
+    char slot_path[4096];
+    if (save_slot_path(save_path, settings.save_slot, slot_path,
+                       sizeof slot_path) == 0)
+      save_ram(gb, slot_path);
+  }
   if (audio_device)
     SDL_CloseAudioDevice(audio_device);
   SDL_DestroyTexture(texture);
