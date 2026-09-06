@@ -44,7 +44,7 @@
   .pad-button.action { border-radius: 50%; width: 62px; height: 62px; }
   .pad-button:active, .pad-button.held { background: #5c987f; }
   @media (orientation: portrait) and (max-width: 700px) {
-    #gamepad { display: block; }
+    #gamepad.visible { display: block; }
     #screen { width: min(94vw, 480px); }
     #settings { width: min(92vw, 560px); }
     .card { width: min(92vw, 640px); }
@@ -101,6 +101,7 @@
   <div class="srow"><label for="speed">Speed</label><select id="speed"><option value="1">1x</option><option value="2">2x</option><option value="3">3x</option><option value="4">4x</option><option value="5">5x</option></select></div>
   <div class="srow"><label for="save-slot">Save Slot</label><select id="save-slot"><option value="A">A</option><option value="1">1</option><option value="2">2</option><option value="3">3</option><option value="4">4</option><option value="5">5</option></select></div>
   <div class="srow"><label for="auto-save">Auto Save</label><select id="auto-save"><option value="0">Off</option><option value="5">Every 5s</option><option value="10">Every 10s</option><option value="30">Every 30s</option><option value="60">Every 1m</option></select></div>
+  <div class="srow"><label for="show-pad">Portrait keypad</label><input id="show-pad" type="checkbox"> Show keypad</div>
   <div class="srow"><label>Save data</label><button id="save-slot-now">Save Slot</button> <button id="load-slot">Load Save</button></div>
   <div class="srow"><label>Battery data</label><button id="download-save">Download Save</button> <button id="import-save">Import Save</button><input id="save-file" type="file" accept=".sav" hidden></div>
   <div class="srow"><label>Remap keys</label><span id="keymap"></span></div>

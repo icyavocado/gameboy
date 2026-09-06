@@ -23,6 +23,7 @@ var Module = {
   var palette = localStorage.getItem("gb-palette") || "none";
   var saveSlot = localStorage.getItem("gb-save-slot") || "A";
   var autoSave = Number(localStorage.getItem("gb-auto-save") || 10);
+  var showPad = localStorage.getItem("gb-show-pad") === "1";
   var currentRomKey = "default";
   var autoSaveTimer = null;
   var remapTarget = null;
@@ -413,6 +414,13 @@ var Module = {
   document.getElementById("volume-value").textContent = volume + "%";
   document.getElementById("palette").value = palette;
   document.getElementById("speed").value = String(speed);
+  document.getElementById("show-pad").checked = showPad;
+  document.getElementById("gamepad").classList.toggle("visible", showPad);
+  document.getElementById("show-pad").onchange = function () {
+    showPad = this.checked;
+    localStorage.setItem("gb-show-pad", showPad ? "1" : "0");
+    document.getElementById("gamepad").classList.toggle("visible", showPad);
+  };
   document.getElementById("save-slot").value = saveSlot;
   document.getElementById("auto-save").value = String(autoSave);
   document.getElementById("palette").dispatchEvent(new Event("change"));
