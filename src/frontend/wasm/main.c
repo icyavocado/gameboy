@@ -14,8 +14,10 @@
    requestAnimationFrame and copies the framebuffer to a canvas. */
 static gb_t *browser_gb;
 
-/* One second of 48 kHz stereo lookahead for the Web Audio pump. Frames
-   the core produces while muted (callback unset) are simply dropped. */
+/* One second of 48 kHz stereo lookahead for the Web Audio pump. The unread
+   run [audio_start, audio_start + audio_count) is always contiguous so JS can
+   read straight from wasm_audio_ptr(). Oldest frames are dropped on overflow;
+   the web frontend paces emulation from this queue so that rarely happens. */
 #define AUDIO_CAPACITY_FRAMES 48000u
 static int16_t *audio_buf;
 static size_t audio_start;
@@ -25,21 +27,22 @@ static void audio_sink(void *user, const int16_t *stereo, size_t frames) {
   (void)user;
   if (!audio_buf || !stereo)
     return;
-  if (frames >= AUDIO_CAPACITY_FRAMES) {
+  if (frames > AUDIO_CAPACITY_FRAMES) {
     stereo += (frames - AUDIO_CAPACITY_FRAMES) * 2;
     frames = AUDIO_CAPACITY_FRAMES;
-    audio_start = 0;
-    audio_count = 0;
   }
-  while (audio_count + frames > AUDIO_CAPACITY_FRAMES) {
+  if (audio_count + frames > AUDIO_CAPACITY_FRAMES) {
     size_t drop = audio_count + frames - AUDIO_CAPACITY_FRAMES;
-    audio_start = (audio_start + drop) % AUDIO_CAPACITY_FRAMES;
+    audio_start += drop;
     audio_count -= drop;
   }
-  for (size_t i = 0; i < frames * 2; i++) {
-    audio_buf[(audio_start + audio_count * 2 + i) % (AUDIO_CAPACITY_FRAMES * 2)] =
-        stereo[i];
+  if (audio_start + audio_count + frames > AUDIO_CAPACITY_FRAMES) {
+    memmove(audio_buf, audio_buf + audio_start * 2,
+            audio_count * 2 * sizeof *audio_buf);
+    audio_start = 0;
   }
+  memcpy(audio_buf + (audio_start + audio_count) * 2, stereo,
+         frames * 2 * sizeof *audio_buf);
   audio_count += frames;
 }
 
@@ -140,18 +143,10 @@ const int16_t EMSCRIPTEN_KEEPALIVE *wasm_audio_ptr(void) {
 void EMSCRIPTEN_KEEPALIVE wasm_audio_consume(size_t frames) {
   if (frames > audio_count)
     frames = audio_count;
-  audio_start = (audio_start + frames) % AUDIO_CAPACITY_FRAMES;
+  audio_start += frames;
   audio_count -= frames;
-  /* Keep the unread run contiguous so one pointer read suffices. */
-  if (audio_count && audio_start + audio_count > AUDIO_CAPACITY_FRAMES) {
-    size_t first = AUDIO_CAPACITY_FRAMES - audio_start;
-    memmove(audio_buf + first * 2, audio_buf,
-            (audio_count - first) * 2 * sizeof *audio_buf);
-    memmove(audio_buf, audio_buf + audio_start * 2, first * 2 * sizeof *audio_buf);
+  if (!audio_count)
     audio_start = 0;
-  } else if (!audio_count) {
-    audio_start = 0;
-  }
 }
 
 /* JS drives frames via requestAnimationFrame; main only exists to satisfy

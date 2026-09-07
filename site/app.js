@@ -19,7 +19,8 @@ var Module = {
   var running = false;
   var booted = false;
   var speed = Number(localStorage.getItem("gb-speed") || 1);
-  var volume = Number(localStorage.getItem("gb-volume") || 100);
+  var storedVolume = localStorage.getItem("gb-volume");
+  var volume = storedVolume === null ? 0 : Number(storedVolume);
   var palette = localStorage.getItem("gb-palette") || "none";
   var saveSlot = localStorage.getItem("gb-save-slot") || "A";
   var autoSave = Number(localStorage.getItem("gb-auto-save") || 10);
@@ -46,6 +47,16 @@ var Module = {
 
   var audioCtx = null;
   var gainNode = null;
+  var audioStarted = false;
+  var nextAudioTime = 0;
+  var AUDIO_PREBUFFER = 4800;
+  var AUDIO_CHUNK = 1024;
+  var AUDIO_LOOKAHEAD = 0.25;
+  /* Audio-driven pacing: keep this much audio queued (WASM ring + Web Audio
+     scheduled) and run more/fewer emulator frames per tick to hold it. */
+  var AUDIO_TARGET_MIN = 0.08;
+  var AUDIO_TARGET_MAX = 0.20;
+  var MAX_FRAMES_PER_TICK = 4;
 
   function status(text) { statusEl.textContent = text; }
 
@@ -61,30 +72,53 @@ var Module = {
       audioCtx = null;
       return;
     }
-    var pump = audioCtx.createScriptProcessor(4096, 0, 2);
-    pump.onaudioprocess = function (event) {
-      var left = event.outputBuffer.getChannelData(0);
-      var right = event.outputBuffer.getChannelData(1);
-      var avail = Module.ccall("wasm_audio_available", "number", [], []);
-      var take = Math.min(avail, left.length);
-      if (take > 0) {
-        var ptr = Module.ccall("wasm_audio_ptr", "number", [], []);
-        var heap = Module.HEAP16;
-        for (var i = 0; i < take; i++) {
-          left[i] = heap[(ptr >> 1) + i * 2] / 32768;
-          right[i] = heap[(ptr >> 1) + i * 2 + 1] / 32768;
-        }
-        Module.ccall("wasm_audio_consume", null, ["number"], [take]);
-      }
-      for (var j = take; j < left.length; j++) {
-        left[j] = 0;
-        right[j] = 0;
-      }
-    };
     gainNode = audioCtx.createGain();
     gainNode.gain.value = volume / 100;
-    pump.connect(gainNode);
-    gainNode.connect(audioCtx.destination);
+  }
+
+  function scheduleAudio() {
+    if (!audioCtx)
+      return;
+    var available = Module.ccall("wasm_audio_available", "number", [], []);
+    if (!audioStarted && available < AUDIO_PREBUFFER)
+      return;
+    if (!audioStarted) {
+      nextAudioTime = audioCtx.currentTime + 0.08;
+      gainNode.connect(audioCtx.destination);
+      audioStarted = true;
+    }
+    if (audioCtx.state === "suspended")
+      audioCtx.resume();
+    if (nextAudioTime < audioCtx.currentTime)
+      nextAudioTime = audioCtx.currentTime + 0.02;
+    while (available >= AUDIO_CHUNK &&
+           nextAudioTime < audioCtx.currentTime + AUDIO_LOOKAHEAD) {
+      var ptr = Module.ccall("wasm_audio_ptr", "number", [], []);
+      var buffer = audioCtx.createBuffer(2, AUDIO_CHUNK, 48000);
+      var left = buffer.getChannelData(0);
+      var right = buffer.getChannelData(1);
+      var heap = Module.HEAP16;
+      for (var i = 0; i < AUDIO_CHUNK; i++) {
+        left[i] = heap[(ptr >> 1) + i * 2] / 32768;
+        right[i] = heap[(ptr >> 1) + i * 2 + 1] / 32768;
+      }
+      var source = audioCtx.createBufferSource();
+      source.buffer = buffer;
+      source.connect(gainNode);
+      source.start(nextAudioTime);
+      nextAudioTime += AUDIO_CHUNK / 48000;
+      Module.ccall("wasm_audio_consume", null, ["number"], [AUDIO_CHUNK]);
+      available -= AUDIO_CHUNK;
+    }
+  }
+
+  function unlockAudio() {
+    if (!booted)
+      return;
+    ensureAudio();
+    if (audioCtx && audioCtx.state === "suspended")
+      audioCtx.resume();
+    scheduleAudio();
   }
 
   function copyFrame(ptr) {
@@ -101,11 +135,33 @@ var Module = {
     ctx.putImageData(image, 0, 0);
   }
 
+  function queuedAudioSeconds() {
+    var ring = Module.ccall("wasm_audio_available", "number", [], []) / 48000;
+    var scheduled = audioStarted ? Math.max(0, nextAudioTime - audioCtx.currentTime) : 0;
+    return ring + scheduled;
+  }
+
   function frame() {
     if (!running)
       return;
-    for (var i = 0; i < speed; i++)
+    var runs = speed;
+    if (speed === 1 && audioStarted && audioCtx) {
+      /* Hold the audio queue in [MIN, MAX] regardless of display refresh rate. */
+      var queued = queuedAudioSeconds();
+      if (queued > AUDIO_TARGET_MAX)
+        runs = 0;
+      else if (queued < AUDIO_TARGET_MIN)
+        runs = MAX_FRAMES_PER_TICK;
+    }
+    for (var i = 0; i < runs; i++)
       Module.ccall("wasm_run_frame", null, [], []);
+    if (speed > 1) {
+      /* Fast-forward: keep only the freshest audio so the queue never wraps. */
+      var excess = Module.ccall("wasm_audio_available", "number", [], []) - AUDIO_PREBUFFER;
+      if (excess > 0)
+        Module.ccall("wasm_audio_consume", null, ["number"], [excess]);
+    }
+    scheduleAudio();
     copyFrame(Module.ccall("wasm_framebuffer", "number", [], []));
     requestAnimationFrame(frame);
   }
@@ -205,7 +261,7 @@ var Module = {
     restoreBattery();
     booted = running = true;
     ensureAudio();
-    if (audioCtx && audioCtx.state === "suspended") audioCtx.resume();
+    unlockAudio();
     status("Running: " + name);
     requestAnimationFrame(frame);
   }
@@ -428,6 +484,7 @@ var Module = {
   scheduleAutoSave();
 
   window.addEventListener("keydown", function (event) {
+    unlockAudio();
     if (remapTarget) {
       var old = remapTarget;
       KEYMAP[event.code] = KEYMAP[old];
@@ -453,6 +510,7 @@ var Module = {
     buttons &= ~bit;
     Module.ccall("wasm_set_input", null, ["number"], [buttons]);
   });
+  window.addEventListener("pointerdown", unlockAudio);
 
   window.addEventListener("pagehide", persistBattery);
 }());
