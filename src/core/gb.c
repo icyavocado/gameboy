@@ -5,7 +5,7 @@
 
 /* Invalid SM83 opcodes execute as 4-cycle NOPs; with debugging enabled they
    are also reported on stderr to fail loudly instead of hiding decoder gaps. */
-#define STATE_VERSION 14u
+#define STATE_VERSION 16u
 #define STATE_HEADER_SIZE 24u
 #define MAX_BREAKPOINTS 16u
 #define RTC_SAVE_SIZE 24u
@@ -45,6 +45,8 @@ struct gb {
   uint32_t audio_phase[4];
   uint32_t audio_host_phase[4];
   int32_t audio_filter[2];
+  int32_t audio_hp[2];
+  int32_t audio_hp_x[2];
   uint16_t noise_lfsr;
   uint16_t audio_seq_cycles, audio_sweep_shadow, audio_wave_delay;
   uint16_t audio_length[4];
@@ -52,6 +54,7 @@ struct gb {
       audio_sweep_timer, audio_sweep_enabled, audio_sweep_negate;
   uint8_t audio_enabled[4];
   gb_model_t model;
+  uint8_t model_forced;
   gb_serial_cb serial;
   void *serial_user;
   struct gb *serial_peer;
@@ -288,6 +291,20 @@ static void audio_frame(gb_t *g) {
     g->audio_filter[1] += (right_sample - g->audio_filter[1]) / 4;
     left_sample = g->audio_filter[0];
     right_sample = g->audio_filter[1];
+    /* First-order high-pass (~7.5 Hz cutoff): strips the DC offset that
+       low-duty square waves carry, which real hardware blocks with output
+       capacitors. A stuck low note stays audible; the cone-thumping bias
+       does not. */
+    int hp_left =
+        left_sample - g->audio_hp_x[0] + (int)(g->audio_hp[0] * 1023 / 1024);
+    int hp_right =
+        right_sample - g->audio_hp_x[1] + (int)(g->audio_hp[1] * 1023 / 1024);
+    g->audio_hp_x[0] = left_sample;
+    g->audio_hp_x[1] = right_sample;
+    g->audio_hp[0] = hp_left;
+    g->audio_hp[1] = hp_right;
+    left_sample = hp_left;
+    right_sample = hp_right;
     if (left_sample > 32767) left_sample = 32767;
     if (left_sample < -32768) left_sample = -32768;
     if (right_sample > 32767) right_sample = 32767;
@@ -1725,7 +1742,10 @@ int gb_load_rom(gb_t *g, const uint8_t *r, size_t n) {
     return -1;
   memcpy(g->rom, r, n);
   g->rom_size = n;
-  if (g->model == GB_MODEL_AUTO)
+  /* Re-detect the model from the header on every load unless the user
+     explicitly forced one; otherwise a second ROM inherits the first ROM's
+     model and CGB games boot in DMG mode without color. */
+  if (!g->model_forced)
     g->model = (r[0x143] & 0x80) ? GB_MODEL_CGB : GB_MODEL_DMG;
   g->mbc = r[0x147] == 5 || r[0x147] == 6
                ? 2
@@ -1811,7 +1831,7 @@ int gb_load_ram(gb_t *g, const uint8_t *data, size_t n) {
 }
 size_t gb_save_state_size(const gb_t *g) {
   return g ? STATE_HEADER_SIZE + 0x10000u + sizeof g->vram + sizeof g->wram +
-                           0xa0u + sizeof g->fb + sizeof g->bg_line + 292u + g->ram_size
+                           0xa0u + sizeof g->fb + sizeof g->bg_line + 309u + g->ram_size
            : 0;
 }
 size_t gb_save_state(const gb_t *g, uint8_t *out) {
@@ -1883,6 +1903,7 @@ size_t gb_save_state(const gb_t *g, uint8_t *out) {
   put32(&p, g->rtc_cycles);
   put32(&p, g->audio_remainder);
   put32(&p, (uint32_t)g->model);
+  *p++ = g->model_forced;
   *p++ = g->key1;
   *p++ = g->opri;
   *p++ = g->ir;
@@ -1914,6 +1935,8 @@ size_t gb_save_state(const gb_t *g, uint8_t *out) {
   }
   for (unsigned i = 0; i < 4; i++) put32(&p, g->audio_host_phase[i]);
   for (unsigned i = 0; i < 2; i++) put32(&p, (uint32_t)g->audio_filter[i]);
+  for (unsigned i = 0; i < 2; i++) put32(&p, (uint32_t)g->audio_hp[i]);
+  for (unsigned i = 0; i < 2; i++) put32(&p, (uint32_t)g->audio_hp_x[i]);
   if (g->ram_size)
     memcpy(p, g->ram, g->ram_size);
   return gb_save_state_size(g);
@@ -1985,6 +2008,7 @@ int gb_load_state(gb_t *g, const uint8_t *data, size_t n) {
   g->rtc_cycles = get32(&p);
   g->audio_remainder = get32(&p);
   g->model = (gb_model_t)get32(&p);
+  g->model_forced = *p++;
   g->key1 = *p++;
   g->opri = *p++;
   g->ir = *p++;
@@ -2016,11 +2040,16 @@ int gb_load_state(gb_t *g, const uint8_t *data, size_t n) {
   }
   for (unsigned i = 0; i < 4; i++) g->audio_host_phase[i] = get32(&p);
   for (unsigned i = 0; i < 2; i++) g->audio_filter[i] = (int32_t)get32(&p);
+  for (unsigned i = 0; i < 2; i++) g->audio_hp[i] = (int32_t)get32(&p);
+  for (unsigned i = 0; i < 2; i++) g->audio_hp_x[i] = (int32_t)get32(&p);
   if (g->ram_size)
     memcpy(g->ram, p, g->ram_size);
   return 0;
 }
-void gb_set_model(gb_t *g, gb_model_t m) { g->model = m; }
+void gb_set_model(gb_t *g, gb_model_t m) {
+  g->model = m;
+  g->model_forced = (uint8_t)(m != GB_MODEL_AUTO);
+}
 void gb_reset(gb_t *g) {
   if (g->model == GB_MODEL_CGB) {
     g->af = 0x1180;
@@ -2079,6 +2108,8 @@ void gb_reset(gb_t *g) {
   memset(g->audio_phase, 0, sizeof g->audio_phase);
   memset(g->audio_host_phase, 0, sizeof g->audio_host_phase);
   memset(g->audio_filter, 0, sizeof g->audio_filter);
+  memset(g->audio_hp, 0, sizeof g->audio_hp);
+  memset(g->audio_hp_x, 0, sizeof g->audio_hp_x);
   memset(g->audio_length, 0, sizeof g->audio_length);
   memset(g->audio_volume, 0, sizeof g->audio_volume);
   memset(g->audio_envelope_timer, 0, sizeof g->audio_envelope_timer);

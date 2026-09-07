@@ -908,6 +908,68 @@ UTEST(core, apu_wave_and_noise_channels) {
   gb_destroy(g);
 }
 
+static int64_t hp_sum;
+static size_t hp_samples;
+static int16_t hp_peak;
+static void hp_callback(void *unused, const int16_t *stereo, size_t frames) {
+  (void)unused;
+  for (size_t i = 0; i < frames; i++)
+    hp_sum += stereo[i * 2];
+  hp_samples += frames;
+  for (size_t i = 0; i < frames * 2; i++)
+    if (stereo[i] > hp_peak)
+      hp_peak = stereo[i];
+}
+
+static void core_apu_highpass_removes_dc(void) {
+  /* Worst case for DC offset: 12.5% duty square at 64 Hz, full volume, left
+     on indefinitely (e.g. a stuck note after Game Over). The tone must stay
+     audible while its cone-thumping bias is stripped. */
+  gb_t *g = load((const uint8_t[]){0x00}, 1);
+  hp_sum = 0;
+  hp_samples = 0;
+  hp_peak = 0;
+  gb_set_audio_callback(g, hp_callback, NULL);
+  gb_dbg_write(g, 0xff26, 0x80);
+  gb_dbg_write(g, 0xff11, 0x00);
+  gb_dbg_write(g, 0xff12, 0xf0);
+  gb_dbg_write(g, 0xff13, 0x00);
+  gb_dbg_write(g, 0xff14, 0x80);
+  gb_dbg_write(g, 0xff24, 0x77);
+  gb_dbg_write(g, 0xff25, 0x11);
+  for (unsigned i = 0; i < 120; i++)
+    gb_run_frame(g);
+  int mean = (int)(hp_sum / (int64_t)hp_samples);
+  ASSERT_TRUE(mean > -1500 && mean < 1500);
+  ASSERT_TRUE(hp_peak > 3000);
+  gb_destroy(g);
+}
+
+static void core_model_redetects_on_rom_reload(void) {
+  /* Loading a second ROM into the same instance must not inherit the first
+     ROM's model, or CGB games boot in DMG mode without color. KEY1 (FF4D)
+     reads 0xff on DMG and 0x7e on CGB at normal speed. */
+  static uint8_t rom[0x8000];
+  gb_t *g = gb_create();
+  ASSERT_TRUE(g);
+  memset(rom, 0, sizeof rom);
+  rom[0x143] = 0x00;
+  ASSERT_EQ(gb_load_rom(g, rom, sizeof rom), 0);
+  ASSERT_EQ(gb_dbg_read(g, 0xff4d), 0xff);
+  memset(rom, 0, sizeof rom);
+  rom[0x143] = 0x80;
+  ASSERT_EQ(gb_load_rom(g, rom, sizeof rom), 0);
+  ASSERT_EQ(gb_dbg_read(g, 0xff4d), 0x7e);
+  /* An explicit override still sticks across loads; back to AUTO re-detects. */
+  gb_set_model(g, GB_MODEL_DMG);
+  ASSERT_EQ(gb_load_rom(g, rom, sizeof rom), 0);
+  ASSERT_EQ(gb_dbg_read(g, 0xff4d), 0xff);
+  gb_set_model(g, GB_MODEL_AUTO);
+  ASSERT_EQ(gb_load_rom(g, rom, sizeof rom), 0);
+  ASSERT_EQ(gb_dbg_read(g, 0xff4d), 0x7e);
+  gb_destroy(g);
+}
+
 UTEST(core, apu_frequency_register_increases_pitch) {
   gb_t *g = load((const uint8_t[]){0x00}, 1);
   gb_set_audio_callback(g, audio_callback, NULL);
@@ -1250,6 +1312,8 @@ int main(void) {
   core_save_state_round_trip();
   core_apu_square_channel();
   core_apu_wave_and_noise_channels();
+  core_apu_highpass_removes_dc();
+  core_model_redetects_on_rom_reload();
   core_apu_frequency_register_increases_pitch();
   core_apu_square_pitch_matches_register();
   core_apu_sweep_disabled_leaves_frequency();
@@ -1265,6 +1329,6 @@ int main(void) {
   core_timer_overflow_reload_delay();
   core_timer_overflow_write_cancel_and_ignore();
   ppu_stat_write_rechecks_coincidence();
-  puts("33 tests passed");
+  puts("35 tests passed");
   return 0;
 }
