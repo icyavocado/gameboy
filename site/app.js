@@ -20,7 +20,7 @@ var Module = {
   var booted = false;
   var speed = Number(localStorage.getItem("gb-speed") || 1);
   var storedVolume = localStorage.getItem("gb-volume");
-  var volume = storedVolume === null ? 0 : Number(storedVolume);
+  var volume = storedVolume === null ? 20 : Number(storedVolume);
   var palette = localStorage.getItem("gb-palette") || "none";
   var saveSlot = localStorage.getItem("gb-save-slot") || "A";
   var autoSave = Number(localStorage.getItem("gb-auto-save") || 10);
