@@ -198,8 +198,14 @@ python3 -m http.server 8080 --directory build-wasm
 ```
 
 Open <http://localhost:8080/gb-wasm.html>. The browser build supports ROM file
-loading, video, keyboard input, Web Audio, battery saves in local storage, and
-save states in local storage.
+loading, video, keyboard and touch input, Web Audio, per-ROM battery save
+slots with configurable auto-save, and local save states.
+
+The on-page Settings button exposes volume (muted by default), palette,
+speed, save slots, auto-save interval, key remapping, and a portrait touch
+keypad. Battery saves and save states can be downloaded as `.sav` / `.state`
+files and imported back later. A GitHub Actions job builds the same site and
+deploys it to GitHub Pages on every `main` push.
 
 ## Testing
 
@@ -220,6 +226,7 @@ and sound ROMs when they are present under the git-ignored `tests/roms/` tree.
 Fetch the supported test ROM collection with:
 
 ```sh
+tools/fetch_roms.sh
 ctest --test-dir build-frontend --output-on-failure
 ```
 
@@ -237,7 +244,7 @@ ROM assets cleanly.
 - [ ] Improve cycle-level PPU FIFO accuracy across all hardware revisions
 - [ ] Expand CGB and APU acceptance coverage
 - [ ] Add browser gamepad support
-- [ ] Publish a hosted WebAssembly demo
+- [x] Publish a hosted WebAssembly demo via GitHub Pages CI
 
 ## Contributing
 
