@@ -62,6 +62,5 @@ void audio_sequence(gb_t *);
 void ppu_line(gb_t *, unsigned);
 void ppu_stat(gb_t *);
 unsigned ppu_mode3_length(gb_t *);
-unsigned hblank_edge_delay(gb_t *);
 
 #endif

@@ -673,28 +673,12 @@ static void wr(gb_t *g, uint16_t a, uint8_t v) {
         g->mem[0xff44] = 0;
       }
     } else if (!(old & 0x80)) {
-      /* LCD enabled: hardware reports mode 0 for the first ~92 dots of
-         line 0 with OAM/VRAM still accessible (GBMicrotest
-         lcdon_to_oam_unlock_a/b pin the mode-0 window past dot 204), then
-         runs a truncated 4-dot OAM search, a 162-dot mode 3 and a 190-dot
-         HBlank: 92 + 4 + 162 + 190 = 448. The HBlank end (mode bits) stays
-         within ~2 dots of the old position so HBlank-STAT timing is kept. */
+      /* LCD enabled: mode 0 remains for 76 dots before the truncated mode 2. */
       g->ppu_mode = 0;
-      g->ppu_cycles = 120; /* 204 - 84 dots of mode 0 remain */
+      g->ppu_cycles = 128; /* 204 - 76 dots of mode 0 remain */
       g->ppu_first_line = 1;
-      g->ppu_enable_line = 1;
       g->mem[0xff44] = 0;
-      /* Restarting the comparison clock re-evaluates LY=LYC from LY=0 and
-         raises STAT on a 0->1 LYC edge (mooneye stat_lyc_onoff round 4).
-         The mode-driven part of the level is adopted silently: hardware
-         does not raise a mode interrupt for the post-enable mode-0 window
-         (GBMicrotest int_hblank_halt_* wake at a later HBlank instead). */
-      {
-        uint8_t stat = g->mem[0xff41];
-        unsigned lyc_sig = g->mem[0xff45] == 0 && (stat & 64);
-        if (lyc_sig && !g->stat_signal) g->mem[0xff0f] |= 2;
-        g->stat_signal = (uint8_t)((stat & 8) || lyc_sig);
-      }
+      ppu_stat(g);
     }
     return;
   }
@@ -849,80 +833,26 @@ static int cb(gb_t *g, uint8_t o) {
 }
 static void ppu_tick(gb_t *g) {
   if (!(g->mem[0xff40] & 0x80)) return;
-  if (g->stat_hblank_pend && --g->stat_hblank_dly == 0) {
-    /* Delayed HBlank edge: the level was adopted at the term; raise now
-       if it still holds (it may have dropped via a mid-delay STAT write). */
-    g->stat_hblank_pend = 0;
-    if ((g->mem[0xff41] & 8) && g->stat_signal) g->mem[0xff0f] |= 2;
-  }
-  if (g->ppu_boot) {
-    /* Post-reset transient (GBMicrotest poweron_*): VBlank reports for 54
-       dots with LY already 0, then a 4-dot mode-0 glitch, then a normal
-       line 0. LY stays 0 throughout; coincidence evaluates live. */
-    g->ppu_boot--;
-    g->ppu_mode = g->ppu_boot >= 4 ? 1 : 0;
-    if (!g->ppu_boot) {
-      g->ppu_mode = 2;
-      g->ppu_cycles = 0;
-    }
-    ppu_stat(g);
-    return;
-  }
-  if (g->ppu_mode == 0 && !g->ppu_first_line && !g->ppu_enable_line &&
-      g->mem[0xff44] < 144) {
-    unsigned len = 456u - 80u - g->ppu_mode3 + (g->mem[0xff44] == 1 ? 4 : 0);
-    if (g->ppu_cycles + 1 == len - 3) {
-      /* LY leads the mode change by 3 dots: increment now so LYC edges fire
-         on time; the mode (and VBlank entry) still flips at HBlank end. */
-      g->mem[0xff44]++;
-      ppu_stat(g);
-    }
-  }
   unsigned mode_len = g->ppu_mode == 2 ? 80 : g->ppu_mode == 3 ? g->ppu_mode3 :
       g->ppu_mode == 1 ? 456 : 456u - 80u - g->ppu_mode3;
-  if (g->ppu_mode == 0 && g->ppu_enable_line && !g->ppu_first_line)
-    mode_len = 196; /* post-enable HBlank runs short (unlock_c/l0 line-1 pin) */
   if (++g->ppu_cycles < mode_len) return;
   g->ppu_cycles = 0;
   if (g->ppu_mode == 2) {
     g->ppu_mode = 3;
-    /* The enable line's mode 3 runs 4 dots short so the HBlank end stays
-       put while the lengthened mode-0 window still covers the oam_unlock
-       samples (a/b) and their HBlank sample (c). SCX/sprite penalties are
-       preserved so per-SCX HBlank timing keeps its shape. */
-    g->ppu_mode3 = (uint16_t)(g->ppu_enable_line ? ppu_mode3_length(g) - 4 :
-                                                 ppu_mode3_length(g));
+    g->ppu_mode3 = (uint16_t)ppu_mode3_length(g);
   } else if (g->ppu_mode == 3) {
     ppu_line(g, g->mem[0xff44]);
     g->ppu_mode = 0;
-    /* Mode bits flip now; the HBlank STAT edge may lag by D(SCX) dots. */
-    if ((g->mem[0xff41] & 8) && !g->stat_signal) {
-      unsigned d = hblank_edge_delay(g);
-      if (d) {
-        g->stat_signal = 1; /* adopt the level silently */
-        g->stat_hblank_pend = 1;
-        g->stat_hblank_dly = (uint8_t)d;
-      }
-    }
     if (g->model == GB_MODEL_CGB && g->mem[0xff44] < 144 &&
         !(g->hdma5 & 0x80) && g->hdma5 != 0xff)
       cgb_dma_block(g);
   } else if (g->ppu_mode == 0) {
     if (g->ppu_first_line) {
-      /* End of the post-enable mode-0 window: line 0 stays selected and a
-         truncated 4-dot OAM search follows. */
       g->ppu_first_line = 0;
       g->ppu_mode = 2;
       g->ppu_cycles = 76;
     } else {
-      /* Normal lines increment LY 4 dots early via the hook above, so only
-         the mode changes here. The LCD-enable line is exempt from the early
-         increment; it keeps the simultaneous LY/mode change instead. */
-      if (g->ppu_enable_line) {
-        g->ppu_enable_line = 0;
-        g->mem[0xff44]++;
-        ppu_stat(g);
-      }
+      g->mem[0xff44]++;
       if (g->mem[0xff44] == 144) {
         g->ppu_mode = 1;
         g->mem[0xff0f] |= 1;
@@ -1372,7 +1302,7 @@ gb_t *gb_create(void) {
   if (g) {
     g->rom_bank = 1;
     g->mem[0xff40] = 0x91;
-    g->mem[0xff47] = 0xfc;
+    g->mem[0xff47] = 0xe4;
     g->mem[0xff00] = 0xcf;
   }
   return g;
@@ -1731,23 +1661,17 @@ void gb_reset(gb_t *g) {
   g->ime = g->halted = g->halt_bug = g->ei_delay = 0;
   g->rom_bank = 1;
   g->ram_bank = g->upper = g->mode = 0;
-  /* Skip-boot divider phase: the boot ROM runs a fixed number of cycles, so
-     hardware reaches $0100 with DIV already advanced (pinned by the
-     poweron_div_* microtests). t_clock stays zero-based for scheduling. */
-  g->divider = BOOT_DIVIDER;
-  g->div = (uint8_t)(g->divider >> 8);
-  g->mem[0xff04] = g->div;
+  g->div = 0;
+  g->divider = 0;
   g->t_clock = 0;
   g->rtc_cycles = 0;
   g->audio_remainder = 0;
   g->timer_signal = 0;
   g->ppu_cycles = 0;
-  g->ppu_mode = 1;
+  g->ppu_mode = 2;
   g->ppu_mode3 = 172;
-  g->ppu_boot = 58;
   g->stat_signal = 0;
   g->ppu_first_line = 0;
-  g->ppu_enable_line = 0;
   g->dma_page = g->dma_index = g->dma_active = g->dma_copy = 0;
   g->dma_busy_start = g->dma_busy_end = g->dma_next = 0;
   g->vbk = 0;
@@ -1761,18 +1685,14 @@ void gb_reset(gb_t *g) {
   g->key1 = 0;
   g->opri = 0;
   g->ir = 0;
-  g->mem[0xff04] = g->div;
+  g->mem[0xff04] = 0;
   g->mem[0xff05] = 0;
   g->mem[0xff06] = 0;
   g->mem[0xff07] = 0;
-  g->mem[0xff02] = 0x7e;
-  g->mem[0xff0f] = 0xe1;
+  g->mem[0xff0f] = 0;
   g->mem[0xffff] = 0;
   g->mem[0xff40] = 0x91;
-  g->mem[0xff46] = 0xff;
-  g->mem[0xff47] = 0xfc;
-  g->mem[0xff48] = 0xff;
-  g->mem[0xff49] = 0xff;
+  g->mem[0xff47] = 0xe4;
   g->mem[0xff4f] = 0xfe;
   g->mem[0xff70] = 0xf9;
   g->bg_palette_index = g->obj_palette_index = 0;

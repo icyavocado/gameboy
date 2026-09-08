@@ -102,7 +102,7 @@ void ppu_stat(gb_t *g) {
   unsigned signal =
       ((g->ppu_mode == 0) && (stat & 8)) ||
       ((g->ppu_mode == 1) && (stat & 16)) ||
-      ((g->ppu_mode == 2) && (stat & 32) && !g->ppu_enable_line) ||
+      ((g->ppu_mode == 2) && (stat & 32)) ||
       (lyc == g->mem[0xff44] && (stat & 64));
   if (signal && !g->stat_signal)
     g->mem[0xff0f] |= 2;
@@ -110,7 +110,7 @@ void ppu_stat(gb_t *g) {
 }
 unsigned ppu_mode3_length(gb_t *g) {
   uint8_t lcdc = g->mem[0xff40];
-  unsigned y = g->mem[0xff44], len = 172 + (g->mem[0xff43] & 4);
+  unsigned y = g->mem[0xff44], len = 172 + (g->mem[0xff43] & 7);
   int wx = (int)g->mem[0xff4b] - 7;
   if ((lcdc & 0x20) && y >= g->mem[0xff4a] && wx > 0 && wx < 160)
     len += 6;
@@ -150,8 +150,4 @@ unsigned ppu_mode3_length(gb_t *g) {
     seen_key = key;
   }
   return len;
-}
-unsigned hblank_edge_delay(gb_t *g) {
-  static const uint8_t dly[8] = {0, 1, 1, 3, 0, 1, 1, 3};
-  return dly[g->mem[0xff43] & 7];
 }
