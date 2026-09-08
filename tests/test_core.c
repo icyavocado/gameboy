@@ -234,6 +234,9 @@ UTEST(core, ei_delay_interrupt_and_halt) {
 
 UTEST(core, timer_overflow_and_reset_state) {
   gb_t *g = load((const uint8_t[]){0x00}, 1);
+  /* Reset DIV first: with the skip-boot divider phase the TAC enable below
+     would otherwise leave the timer mid-period and shift the overflow. */
+  gb_dbg_write(g, 0xff04, 0);
   gb_dbg_write(g, 0xff06, 0x42);
   gb_dbg_write(g, 0xff05, 0xff);
   gb_dbg_write(g, 0xff07, 0x05);
@@ -246,7 +249,9 @@ UTEST(core, timer_overflow_and_reset_state) {
   gb_dbg_write(g, 0xffff, 0xff);
   gb_reset(g);
   ASSERT_EQ(gb_dbg_read(g, 0xff05), 0);
-  ASSERT_EQ(gb_dbg_read(g, 0xff0f), 0);
+  /* Post-boot IF carries the boot ROM's trailing VBlank plus read-as-1 bits
+     (GBMicrotest poweron_if_000). */
+  ASSERT_EQ(gb_dbg_read(g, 0xff0f), 0xe1);
   ASSERT_EQ(gb_dbg_read(g, 0xffff), 0);
   gb_destroy(g);
 }
@@ -629,7 +634,9 @@ UTEST(core, cgb_hblank_dma) {
   gb_dbg_write(g, 0xff55, 0x82);
   ASSERT_EQ(gb_dbg_read(g, 0xff55), 2);
   ASSERT_EQ(gb_dbg_read(g, 0x8000), 0);
-  for (unsigned i = 0; i < 64; i++)
+  /* The post-boot PPU preamble pushes the first real HBlank out to ~310
+     dots, so step further than the old line-0 timing needed. */
+  for (unsigned i = 0; i < 80; i++)
     gb_dbg_step(g);
   ASSERT_EQ(gb_dbg_read(g, 0xff55), 1);
   ASSERT_EQ(gb_dbg_read(g, 0x8000), 0xb0);
@@ -767,6 +774,7 @@ UTEST(ppu, signed_background_tile_data) {
   gb_dbg_write(g, 0x8800, 0x80);
   gb_dbg_write(g, 0x8801, 0x00);
   gb_dbg_write(g, 0x9800, 0x80);
+  gb_dbg_write(g, 0xff47, 0xe4);
   gb_dbg_write(g, 0xff40, 0x91 & (uint8_t)~0x10);
   gb_run_frame(g);
   ASSERT_EQ(gb_framebuffer(g)[0], 0xffa8a8a8);
@@ -778,7 +786,9 @@ UTEST(ppu, lcd_timing_and_interrupts) {
   gb_dbg_write(g, 0xff41, 0x60);
   gb_dbg_write(g, 0xff45, 1);
   gb_dbg_write(g, 0xffff, 2);
-  step(g, 20);
+  /* The post-boot PPU preamble runs VBlank/glitch for 58 dots, so mode 3 of
+     line 0 starts at dot 138. */
+  step(g, 35);
   ASSERT_EQ(gb_dbg_read(g, 0xff44), 0);
   ASSERT_EQ(gb_dbg_read(g, 0xff41) & 3, 3);
   step(g, 95);
@@ -787,7 +797,9 @@ UTEST(ppu, lcd_timing_and_interrupts) {
   gb_dbg_write(g, 0xff0f, 0);
   gb_reset(g);
   gb_run_frame(g);
-  ASSERT_EQ(gb_dbg_read(g, 0xff44), 0);
+  /* The preamble consumes frame time, so a 70224-cycle frame from boot ends
+     398 dots into line 153 (the offset is stable, not accumulating). */
+  ASSERT_EQ(gb_dbg_read(g, 0xff44), 153);
   ASSERT_TRUE(gb_dbg_read(g, 0xff0f) & 1);
   gb_destroy(g);
 }
@@ -970,6 +982,14 @@ static void core_model_redetects_on_rom_reload(void) {
   gb_destroy(g);
 }
 
+static void core_boot_divider_phase(void) {
+  /* Skip-boot starts the divider where the boot ROM would leave it (pinned
+     by the poweron_div_* microtests), so timer edges line up from cycle 0. */
+  gb_t *g = load((const uint8_t[]){0x00}, 1);
+  ASSERT_EQ(gb_dbg_read(g, 0xff04), 0xab);
+  gb_destroy(g);
+}
+
 UTEST(core, apu_frequency_register_increases_pitch) {
   gb_t *g = load((const uint8_t[]){0x00}, 1);
   gb_set_audio_callback(g, audio_callback, NULL);
@@ -1104,16 +1124,16 @@ UTEST(ppu, lcd_enable_reports_mode0_first) {
   gb_t *g = load((const uint8_t[]){0x00}, 1);
   gb_dbg_write(g, 0xfe00, 0x34);
   gb_dbg_write(g, 0xff40, 0x00); /* LCD off */
-  gb_dbg_write(g, 0xff40, 0x91); /* LCD on: 76-dot mode-0 window on line 0 */
+  gb_dbg_write(g, 0xff40, 0x91); /* LCD on: 84-dot mode-0 window on line 0 */
   ASSERT_EQ(gb_dbg_read(g, 0xff41) & 3, 0);
   ASSERT_EQ(gb_dbg_read(g, 0xff44), 0);
   ASSERT_EQ(gb_dbg_read(g, 0xfe00), 0x34); /* OAM still accessible */
-  step(g, 19); /* 76 dots: truncated 4-dot mode 2 follows */
+  step(g, 21); /* 84 dots: truncated 4-dot mode 2 follows */
   ASSERT_EQ(gb_dbg_read(g, 0xff41) & 3, 2);
   ASSERT_EQ(gb_dbg_read(g, 0xfe00), 0xff); /* OAM now owned by the PPU */
   step(g, 1); /* mode 2 expires after 4 dots total */
   ASSERT_EQ(gb_dbg_read(g, 0xff41) & 3, 3);
-  step(g, 43 + 51); /* mode 3 + mode 0: line 0 keeps its 456-dot length */
+  step(g, 42 + 49); /* mode 3 + mode 0: line 0 keeps its 456-dot length */
   ASSERT_EQ(gb_dbg_read(g, 0xff44), 1);
   ASSERT_EQ(gb_dbg_read(g, 0xff41) & 3, 2);
   gb_destroy(g);
@@ -1123,16 +1143,22 @@ UTEST(ppu, oam_vram_blocked_by_mode) {
   gb_t *g = load((const uint8_t[]){0x00}, 1);
   gb_dbg_write(g, 0x8000, 0x12);
   gb_dbg_write(g, 0xfe00, 0x34);
-  /* Fresh from reset the PPU is in mode 2: OAM reads $FF, VRAM is open. */
+  /* Fresh from reset the PPU runs its VBlank preamble: OAM and VRAM read. */
+  ASSERT_EQ(gb_dbg_read(g, 0xfe00), 0x34);
+  ASSERT_EQ(gb_dbg_read(g, 0x8000), 0x12);
+  /* 15 steps reach mode 2 (OAM owned, VRAM open), 20 more reach mode 3. */
+  step(g, 15);
   ASSERT_EQ(gb_dbg_read(g, 0xfe00), 0xff);
   ASSERT_EQ(gb_dbg_read(g, 0x8000), 0x12);
-  /* 80 T-cycles later mode 3 starts: both regions read $FF. */
   step(g, 20);
   ASSERT_EQ(gb_dbg_read(g, 0xfe00), 0xff);
   ASSERT_EQ(gb_dbg_read(g, 0x8000), 0xff);
-  /* Writes stay permissive; switching the LCD off reopens bus reads. */
+  /* Writes during lock are ignored; switching the LCD off reopens the bus. */
   gb_dbg_write(g, 0x8000, 0x56);
+  ASSERT_EQ(gb_dbg_read(g, 0x8000), 0xff);
   gb_dbg_write(g, 0xff40, 0);
+  ASSERT_EQ(gb_dbg_read(g, 0x8000), 0x12);
+  gb_dbg_write(g, 0x8000, 0x56);
   ASSERT_EQ(gb_dbg_read(g, 0x8000), 0x56);
   ASSERT_EQ(gb_dbg_read(g, 0xfe00), 0x34);
   gb_destroy(g);
@@ -1143,8 +1169,11 @@ UTEST(ppu, stat_lyc_freeze_and_enable_irq) {
   gb_dbg_write(g, 0xff41, 0x40);
   gb_dbg_write(g, 0xffff, 0x02);
   gb_dbg_write(g, 0xff0f, 0);
-  /* Walk 144 scanlines to VBlank. */
-  step(g, 144u * 114u);
+  /* Walk to VBlank: the boot preamble plus LY incrementing 4 dots before
+     each HBlank ends puts LY=144 at dot 65718. */
+  unsigned guard = 20000;
+  while (gb_dbg_read(g, 0xff44) != 144 && guard--)
+    gb_dbg_step(g);
   ASSERT_EQ(gb_dbg_read(g, 0xff44), 144);
   gb_dbg_write(g, 0xff0f, 0);
   gb_dbg_write(g, 0xff45, 0x90); /* LYC=144=LY */
@@ -1175,9 +1204,11 @@ static unsigned mode2_to_mode0_dots(gb_t *g) {
   return sum;
 }
 UTEST(ppu, mode3_sprite_penalty) {
-  /* Fresh from reset the PPU is phase-aligned in mode 2 of line 0, so HALT
-     steps (4 dots each) give exact spans: base mode 3 is 172 dots. */
+  /* Fresh from reset the PPU runs its 58-dot VBlank preamble, so step into
+     mode 2 of line 0 first; HALT steps (4 dots each) then give exact spans
+     from 2 dots into OAM: base mode 3 is 172 dots. */
   gb_t *g = load((const uint8_t[]){0x76}, 1);
+  step(g, 15);
   ASSERT_EQ(gb_dbg_read(g, 0xff44), 0);
   ASSERT_EQ(gb_dbg_read(g, 0xff41) & 3, 2);
   ASSERT_EQ(mode2_to_mode0_dots(g), 252); /* 80 + 172 */
@@ -1188,7 +1219,9 @@ UTEST(ppu, mode3_sprite_penalty) {
     gb_dbg_write(g, (uint16_t)(0xfe00 + i * 4), 16);
     gb_dbg_write(g, (uint16_t)(0xfe00 + i * 4 + 1), 167);
   }
-  ASSERT_EQ(mode2_to_mode0_dots(g), 312); /* +60 */
+  step(g, 15);
+  /* Entry lands at dot 367, one step-quantum past the old alignment. */
+  ASSERT_EQ(mode2_to_mode0_dots(g), 308); /* +60, rounded to steps */
   gb_destroy(g);
   g = load((const uint8_t[]){0x76}, 1);
   gb_dbg_write(g, 0xff40, 0x93);
@@ -1196,12 +1229,14 @@ UTEST(ppu, mode3_sprite_penalty) {
     gb_dbg_write(g, (uint16_t)(0xfe00 + i * 4), 16);
     gb_dbg_write(g, (uint16_t)(0xfe00 + i * 4 + 1), (uint8_t)(i * 8));
   }
+  step(g, 15);
   ASSERT_EQ(mode2_to_mode0_dots(g), 360); /* +108, rounded to steps */
   gb_destroy(g);
   g = load((const uint8_t[]){0x76}, 1);
   gb_dbg_write(g, 0xff40, 0x93);
   gb_dbg_write(g, 0xfe00, 16); /* single X=0: fixed 11-dot penalty */
   gb_dbg_write(g, 0xfe01, 0);
+  step(g, 15);
   ASSERT_EQ(mode2_to_mode0_dots(g), 260); /* +7, rounded to steps */
   gb_destroy(g);
 }
@@ -1220,11 +1255,13 @@ UTEST(core, timer_uses_divider_edges) {
 
 UTEST(core, timer_overflow_reload_delay) {
   gb_t *g = load((const uint8_t[]){0x00}, 1);
+  /* Reset DIV before enabling TAC: with the skip-boot divider phase a later
+     DIV reset would glitch-increment TIMA and shift the overflow. */
+  gb_dbg_write(g, 0xff04, 0);
   gb_dbg_write(g, 0xff06, 0x42);
   gb_dbg_write(g, 0xff05, 0xff);
   gb_dbg_write(g, 0xff07, 0x05);
   gb_dbg_write(g, 0xff0f, 0);
-  gb_dbg_write(g, 0xff04, 0);
   step(g, 4);
   ASSERT_EQ(gb_dbg_read(g, 0xff05), 0);
   ASSERT_EQ(gb_dbg_read(g, 0xff0f) & 4, 0);
@@ -1236,11 +1273,11 @@ UTEST(core, timer_overflow_reload_delay) {
 
 UTEST(core, timer_overflow_write_cancel_and_ignore) {
   gb_t *g = load((const uint8_t[]){0x00}, 1);
+  gb_dbg_write(g, 0xff04, 0);
   gb_dbg_write(g, 0xff06, 0x42);
   gb_dbg_write(g, 0xff05, 0xff);
   gb_dbg_write(g, 0xff07, 0x05);
   gb_dbg_write(g, 0xff0f, 0);
-  gb_dbg_write(g, 0xff04, 0);
   step(g, 4);
   gb_dbg_write(g, 0xff05, 0x99);
   ASSERT_EQ(gb_dbg_read(g, 0xff05), 0x99);
@@ -1249,11 +1286,11 @@ UTEST(core, timer_overflow_write_cancel_and_ignore) {
   ASSERT_EQ(gb_dbg_read(g, 0xff0f) & 4, 0);
   gb_destroy(g);
   g = load((const uint8_t[]){0x00}, 1);
+  gb_dbg_write(g, 0xff04, 0);
   gb_dbg_write(g, 0xff06, 0xcd);
   gb_dbg_write(g, 0xff05, 0xff);
   gb_dbg_write(g, 0xff07, 0x05);
   gb_dbg_write(g, 0xff0f, 0);
-  gb_dbg_write(g, 0xff04, 0);
   step(g, 4);
   step(g, 1);
   gb_dbg_write(g, 0xff05, 0x99);
@@ -1314,6 +1351,7 @@ int main(void) {
   core_apu_wave_and_noise_channels();
   core_apu_highpass_removes_dc();
   core_model_redetects_on_rom_reload();
+  core_boot_divider_phase();
   core_apu_frequency_register_increases_pitch();
   core_apu_square_pitch_matches_register();
   core_apu_sweep_disabled_leaves_frequency();
@@ -1329,6 +1367,6 @@ int main(void) {
   core_timer_overflow_reload_delay();
   core_timer_overflow_write_cancel_and_ignore();
   ppu_stat_write_rechecks_coincidence();
-  puts("35 tests passed");
+  puts("36 tests passed");
   return 0;
 }

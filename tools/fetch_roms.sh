@@ -10,6 +10,12 @@ cp -R "$tmp/cpu_instrs" "$out/"
 cp -R "$tmp/instr_timing" "$out/"
 cp -R "$tmp/mem_timing" "$out/"
 cp -R "$tmp/dmg_sound" "$out/"
+microtest_repo=${GB_MICROTEST_REPO:-https://github.com/aappleby/gbmicrotest.git}
+microtest_tmp=${TMPDIR:-/tmp}/gbmicrotest
+if [ ! -d "$microtest_tmp/.git" ]; then rm -rf "$microtest_tmp"; git clone --depth 1 "$microtest_repo" "$microtest_tmp"; fi
+rm -rf "$out/gbmicrotest"
+mkdir -p "$out/gbmicrotest"
+cp "$microtest_tmp/bin/"*.gb "$out/gbmicrotest/"
 
 collection_url=${GB_TEST_COLLECTION_URL:-https://github.com/c-sp/game-boy-test-roms/releases/download/v7.0/game-boy-test-roms-v7.0.zip}
 archive=${TMPDIR:-/tmp}/game-boy-test-roms-v7.0.zip

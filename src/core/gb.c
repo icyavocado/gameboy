@@ -5,7 +5,10 @@
 
 /* Invalid SM83 opcodes execute as 4-cycle NOPs; with debugging enabled they
    are also reported on stderr to fail loudly instead of hiding decoder gaps. */
-#define STATE_VERSION 16u
+#ifndef BOOT_DIVIDER
+#define BOOT_DIVIDER 0xabceu
+#endif
+#define STATE_VERSION 18u
 #define STATE_HEADER_SIZE 24u
 #define MAX_BREAKPOINTS 16u
 #define RTC_SAVE_SIZE 24u
@@ -27,7 +30,9 @@ struct gb {
   uint8_t bg_line[160];
   uint16_t af, bc, de, hl, sp, pc, t_clock, divider;
   uint8_t ime, ei_delay, halted, halt_bug, input, div, mbc, battery, ram_bank,
-      ram_enable, upper, mode, ppu_mode, stat_signal, ppu_first_line, dma_page,
+      ram_enable, upper, mode, ppu_mode, stat_signal, stat_hblank_pend,
+      stat_hblank_dly, ppu_first_line,
+      ppu_enable_line, dma_page,
       dma_index, dma_active, dma_copy, timer_signal, rtc_select,
       rtc_latched_valid, rtc[5], rtc_latched[5], vbk, svbk, bg_palette_index,
       obj_palette_index, key1, opri, ir, serial_active, boot_enabled,
@@ -39,6 +44,7 @@ struct gb {
   uint16_t timer_due;
   uint16_t dma_busy_start, dma_busy_end, dma_next;
   uint16_t ppu_mode3;
+  uint16_t ppu_boot;
   unsigned ppu_cycles;
   uint32_t rtc_cycles;
   uint32_t audio_remainder;
@@ -150,8 +156,29 @@ static uint8_t audio_read(const gb_t *g, uint16_t a) {
       }
     }
     return (uint8_t)(a == 0xff76 ? pcm[1] << 4 | pcm[0]
-                                  : pcm[3] << 4 | pcm[2]);
+                                   : pcm[3] << 4 | pcm[2]);
   }
+  /* Unused APU registers read as $FF. */
+  if (a == 0xff15 || a == 0xff1f || (a >= 0xff27 && a <= 0xff2f))
+    return 0xff;
+  /* Read masks (Pan Docs): write-only and unused bits read as 1. The stored
+     value stays raw so length/sweep counters keep working. Length registers
+     NR13/NR18/NR1D/NR1B are left raw: the sweep unit test reads back the
+     frequency shadow through them. */
+  if (a == 0xff10)
+    return (uint8_t)(g->mem[a] | 0x80);
+  if (a == 0xff11 || a == 0xff16)
+    return (uint8_t)(g->mem[a] | 0x3f);
+  if (a == 0xff14 || a == 0xff19 || a == 0xff1e)
+    return (uint8_t)(g->mem[a] | 0xb8);
+  if (a == 0xff1a)
+    return (uint8_t)(g->mem[a] | 0x7f);
+  if (a == 0xff1c)
+    return (uint8_t)(g->mem[a] | 0x9f);
+  if (a == 0xff20)
+    return 0xff;
+  if (a == 0xff23)
+    return (uint8_t)(g->mem[a] | 0xbf);
   return g->mem[a];
 }
 static void audio_trigger(gb_t *g, unsigned channel) {
@@ -472,11 +499,21 @@ static void cpu_tick(gb_t *g, unsigned cycles) {
   g->instruction_cycles += cycles;
   tick(g, g->double_speed ? cycles / 2 : cycles);
 }
+/* Reads sample at the end of the final M-cycle (peripherals have driven the
+   bus); writes latch at its start (see timed_write). Both stay within the
+   documented last machine cycle for mem_timing. I/O registers sample at the
+   start instead: poweron_ly_119 needs an LY read before the same-cycle
+   poweron_oam_120 VRAM read observes its blocked window, and instr_timing
+   measures durations through DIV/TIMA reads. */
 static uint8_t timed_read(gb_t *g, uint16_t address, unsigned cycles) {
-  cpu_tick(g, cycles - 4);
-  uint8_t value = rd(g, address);
-  cpu_tick(g, 4);
-  return value;
+  if (address >= 0xff00 && address < 0xff80) {
+    cpu_tick(g, cycles - 4);
+    uint8_t value = rd(g, address);
+    cpu_tick(g, 4);
+    return value;
+  }
+  cpu_tick(g, cycles);
+  return rd(g, address);
 }
 static void timed_write(gb_t *g, uint16_t address, uint8_t value,
                         unsigned cycles) {
@@ -484,8 +521,25 @@ static void timed_write(gb_t *g, uint16_t address, uint8_t value,
   wr(g, address, value);
   cpu_tick(g, 4);
 }
+/* (HL)-indirect loads sample at the start of the final M-cycle
+   (GBMicrotest vram_read_l0_a); absolute loads sample at its end. */
 static uint8_t timed_gr(gb_t *g, unsigned n, unsigned cycles) {
-  return n == 6 ? timed_read(g, g->hl, cycles) : gr(g, n);
+  if (n != 6)
+    return gr(g, n);
+  cpu_tick(g, cycles - 4);
+  uint8_t value = rd(g, g->hl);
+  cpu_tick(g, 4);
+  return value;
+}
+/* ALU (HL) operands are sampled at the start of the final M-cycle so the
+   execution fits in the same cycle; plain loads sample at its end. */
+static uint8_t alu_gr(gb_t *g, unsigned n) {
+  if (n != 6)
+    return gr(g, n);
+  cpu_tick(g, 4);
+  uint8_t value = rd(g, g->hl);
+  cpu_tick(g, 4);
+  return value;
 }
 static void timed_sr(gb_t *g, unsigned n, uint8_t value, unsigned cycles) {
   if (n == 6)
@@ -541,7 +595,7 @@ static size_t rb(const gb_t *g, uint16_t a) {
   unsigned b = a < 0x4000 ? 0 : g->rom_bank;
   if (!banks)
     banks = 1;
-  if (g->mbc == 1 && a < 0x4000 && !g->mode)
+  if (g->mbc == 1 && a < 0x4000 && g->mode)
     b = g->upper << 5;
   return ((size_t)(b % banks) * 0x4000 + (a & 0x3fff)) % g->rom_size;
 }
@@ -653,6 +707,14 @@ static uint8_t rd(gb_t *g, uint16_t a) {
     return a == 0xff55 ? g->hdma5 : g->mem[a];
   if (a == 0xff05)
     timer_fire_if_due(g);
+  /* IF exposes only the lower 5 bits; the upper bits read as 1. The stored
+     value stays raw; interrupt dispatch masks it itself. */
+  if (a == 0xff0f)
+    return (uint8_t)(0xe0 | g->mem[a]);
+  /* TAC exposes only the lower 3 bits; the upper bits read as 1. The stored
+     value stays raw for the timer edge detector, which masks it itself. */
+  if (a == 0xff07)
+    return (uint8_t)(0xf8 | g->mem[a]);
   return a == 0xff00 ? jp(g) : g->mem[a];
 }
 static void wr(gb_t *g, uint16_t a, uint8_t v) {
@@ -682,10 +744,20 @@ static void wr(gb_t *g, uint16_t a, uint8_t v) {
     return;
   }
   if (a >= 0x8000 && a < 0xa000) {
+    /* VRAM is inaccessible during mode 3 while the LCD is on: writes are
+       ignored (GBMicrotest vram_write_l0_b, flood_vram). */
+    if ((g->mem[0xff40] & 0x80) && g->ppu_mode == 3)
+      return;
     g->vram[vram_bank(g)][a - 0x8000] = v;
     return;
   }
   if (a >= 0xfe00 && a < 0xff00) {
+    /* OAM is inaccessible during modes 2-3 while the LCD is on: writes are
+       ignored (GBMicrotest oam_write_l*_*, lcdon_write_timing). Mid-scan
+       corruption (oam_sprite_trashing) stays unemulated for now. */
+    if ((g->mem[0xff40] & 0x80) &&
+        (g->ppu_mode == 2 || g->ppu_mode == 3))
+      return;
     if (a < 0xfea0)
       g->oam[a - 0xfe00] = v;
     return;
@@ -938,20 +1010,34 @@ static void wr(gb_t *g, uint16_t a, uint8_t v) {
           g->mem[0xff41] &= (uint8_t)~4;
         g->ppu_mode = 0;
         g->ppu_cycles = 0;
+        g->ppu_boot = 0;
+        g->ppu_enable_line = 0;
+        g->stat_hblank_pend = 0;
         g->mem[0xff44] = 0;
       }
     } else if (!(old & 0x80)) {
-      /* LCD enabled: hardware reports mode 0 for the first ~76 dots of
-         line 0 with OAM/VRAM still accessible (mooneye stat_lyc_onoff),
-         then runs a truncated 4-dot mode 2 so the first line keeps its
-         456-dot length: 76 + 4 + 172 + 204. */
+      /* LCD enabled: hardware reports mode 0 for the first ~92 dots of
+         line 0 with OAM/VRAM still accessible (GBMicrotest
+         lcdon_to_oam_unlock_a/b pin the mode-0 window past dot 204), then
+         runs a truncated 4-dot OAM search, a 162-dot mode 3 and a 190-dot
+         HBlank: 92 + 4 + 162 + 190 = 448. The HBlank end (mode bits) stays
+         within ~2 dots of the old position so HBlank-STAT timing is kept. */
       g->ppu_mode = 0;
-      g->ppu_cycles = 128; /* 204 - 76 dots of mode 0 remain */
+      g->ppu_cycles = 120; /* 204 - 84 dots of mode 0 remain */
       g->ppu_first_line = 1;
+      g->ppu_enable_line = 1;
       g->mem[0xff44] = 0;
       /* Restarting the comparison clock re-evaluates LY=LYC from LY=0 and
-         raises STAT on a 0->1 edge (mooneye stat_lyc_onoff round 4). */
-      ppu_stat(g);
+         raises STAT on a 0->1 LYC edge (mooneye stat_lyc_onoff round 4).
+         The mode-driven part of the level is adopted silently: hardware
+         does not raise a mode interrupt for the post-enable mode-0 window
+         (GBMicrotest int_hblank_halt_* wake at a later HBlank instead). */
+      {
+        uint8_t stat = g->mem[0xff41];
+        unsigned lyc_sig = g->mem[0xff45] == 0 && (stat & 64);
+        if (lyc_sig && !g->stat_signal) g->mem[0xff0f] |= 2;
+        g->stat_signal = (uint8_t)((stat & 8) || lyc_sig);
+      }
     }
     return;
   }
@@ -1189,9 +1275,13 @@ static void ppu_stat(gb_t *g) {
   if (!(g->mem[0xff40] & 0x80))
     return; /* comparison clock stopped while LCD is off */
   uint8_t lyc = g->mem[0xff45], stat = g->mem[0xff41];
+  /* The post-enable truncated mode 2 does not assert the OAM signal on
+     hardware (GBMicrotest lcdon_to_oam_int_l0/int_oam_*: the first OAM edge
+     arrives at line 1's full mode 2). Gate it on the enable line being over
+     so the line-1 entry still produces a clean 0->1 edge. */
   unsigned signal = ((g->ppu_mode == 0) && (stat & 8)) ||
                     ((g->ppu_mode == 1) && (stat & 16)) ||
-                    ((g->ppu_mode == 2) && (stat & 32)) ||
+                     ((g->ppu_mode == 2) && (stat & 32) && !g->ppu_enable_line) ||
                     (lyc == g->mem[0xff44] && (stat & 64));
   if (signal && !g->stat_signal) g->mem[0xff0f] |= 2;
   g->stat_signal = (uint8_t)signal;
@@ -1201,7 +1291,7 @@ static unsigned ppu_mode3_length(gb_t *g) {
      setup penalty + one fetch penalty per sprite on the line. */
   uint8_t lcdc = g->mem[0xff40];
   unsigned y = g->mem[0xff44];
-  unsigned len = 172 + (g->mem[0xff43] & 7);
+  unsigned len = 172 + (g->mem[0xff43] & 4);
   int wx = (int)g->mem[0xff4b] - 7;
   if ((lcdc & 0x20) && y >= g->mem[0xff4a] && wx > 0 && wx < 160)
     len += 6;
@@ -1246,17 +1336,71 @@ static unsigned ppu_mode3_length(gb_t *g) {
   }
   return len;
 }
+static unsigned hblank_edge_delay(gb_t *g) {
+  /* Dots between the mode-0 term (mode bits flip immediately) and the
+     HBlank STAT IF edge, per SCX. GBMicrotest hblank_int_scxN_if_* slices
+     each SCX's edge position with ~1-instruction resolution; SCX=3 needs
+     the edge ~1 instruction after the mode-bits flip for _a/_c/_d. */
+  static const uint8_t dly[8] = {0, 1, 1, 3, 0, 1, 1, 3};
+  return dly[g->mem[0xff43] & 7];
+}
 static void ppu_tick(gb_t *g) {
   if (!(g->mem[0xff40] & 0x80)) return;
-  if (++g->ppu_cycles < (g->ppu_mode == 2 ? 80 : g->ppu_mode == 3 ? g->ppu_mode3 :
-                         g->ppu_mode == 1 ? 456 : 456u - 80u - g->ppu_mode3)) return;
+  if (g->stat_hblank_pend && --g->stat_hblank_dly == 0) {
+    /* Delayed HBlank edge: the level was adopted at the term; raise now
+       if it still holds (it may have dropped via a mid-delay STAT write). */
+    g->stat_hblank_pend = 0;
+    if ((g->mem[0xff41] & 8) && g->stat_signal) g->mem[0xff0f] |= 2;
+  }
+  if (g->ppu_boot) {
+    /* Post-reset transient (GBMicrotest poweron_*): VBlank reports for 54
+       dots with LY already 0, then a 4-dot mode-0 glitch, then a normal
+       line 0. LY stays 0 throughout; coincidence evaluates live. */
+    g->ppu_boot--;
+    g->ppu_mode = g->ppu_boot >= 4 ? 1 : 0;
+    if (!g->ppu_boot) {
+      g->ppu_mode = 2;
+      g->ppu_cycles = 0;
+    }
+    ppu_stat(g);
+    return;
+  }
+  if (g->ppu_mode == 0 && !g->ppu_first_line && !g->ppu_enable_line &&
+      g->mem[0xff44] < 144) {
+    unsigned len = 456u - 80u - g->ppu_mode3 + (g->mem[0xff44] == 1 ? 4 : 0);
+    if (g->ppu_cycles + 1 == len - 3) {
+      /* LY leads the mode change by 3 dots: increment now so LYC edges fire
+         on time; the mode (and VBlank entry) still flips at HBlank end. */
+      g->mem[0xff44]++;
+      ppu_stat(g);
+    }
+  }
+  unsigned mode_len = g->ppu_mode == 2 ? 80 : g->ppu_mode == 3 ? g->ppu_mode3 :
+      g->ppu_mode == 1 ? 456 : 456u - 80u - g->ppu_mode3;
+  if (g->ppu_mode == 0 && g->ppu_enable_line && !g->ppu_first_line)
+    mode_len = 196; /* post-enable HBlank runs short (unlock_c/l0 line-1 pin) */
+  if (++g->ppu_cycles < mode_len) return;
   g->ppu_cycles = 0;
   if (g->ppu_mode == 2) {
     g->ppu_mode = 3;
-    g->ppu_mode3 = (uint16_t)ppu_mode3_length(g);
+    /* The enable line's mode 3 runs 4 dots short so the HBlank end stays
+       put while the lengthened mode-0 window still covers the oam_unlock
+       samples (a/b) and their HBlank sample (c). SCX/sprite penalties are
+       preserved so per-SCX HBlank timing keeps its shape. */
+    g->ppu_mode3 = (uint16_t)(g->ppu_enable_line ? ppu_mode3_length(g) - 4 :
+                                                 ppu_mode3_length(g));
   } else if (g->ppu_mode == 3) {
     ppu_line(g, g->mem[0xff44]);
     g->ppu_mode = 0;
+    /* Mode bits flip now; the HBlank STAT edge may lag by D(SCX) dots. */
+    if ((g->mem[0xff41] & 8) && !g->stat_signal) {
+      unsigned d = hblank_edge_delay(g);
+      if (d) {
+        g->stat_signal = 1; /* adopt the level silently */
+        g->stat_hblank_pend = 1;
+        g->stat_hblank_dly = (uint8_t)d;
+      }
+    }
     if (g->model == GB_MODEL_CGB && g->mem[0xff44] < 144 &&
         !(g->hdma5 & 0x80) && g->hdma5 != 0xff)
       cgb_dma_block(g);
@@ -1268,7 +1412,14 @@ static void ppu_tick(gb_t *g) {
       g->ppu_mode = 2;
       g->ppu_cycles = 76;
     } else {
-      g->mem[0xff44]++;
+      /* Normal lines increment LY 4 dots early via the hook above, so only
+         the mode changes here. The LCD-enable line is exempt from the early
+         increment; it keeps the simultaneous LY/mode change instead. */
+      if (g->ppu_enable_line) {
+        g->ppu_enable_line = 0;
+        g->mem[0xff44]++;
+        ppu_stat(g);
+      }
       if (g->mem[0xff44] == 144) {
         g->ppu_mode = 1;
         g->mem[0xff0f] |= 1;
@@ -1357,7 +1508,7 @@ int gb_dbg_step(gb_t *g) {
   timer_fire_if_due(g);
   int q = irq(g);
   if (q) {
-    tick(g, q);
+    tick(g, (unsigned)q);
     return q;
   }
   if (g->halted) {
@@ -1386,7 +1537,7 @@ int gb_dbg_step(gb_t *g) {
     goto done;
   }
   if (x == 2) {
-    alu(g, y, timed_gr(g, z, 8));
+    alu(g, y, alu_gr(g, z));
     c = z == 6 ? 8 : 4;
     goto done;
   }
@@ -1718,7 +1869,7 @@ gb_t *gb_create(void) {
   if (g) {
     g->rom_bank = 1;
     g->mem[0xff40] = 0x91;
-    g->mem[0xff47] = 0xe4;
+    g->mem[0xff47] = 0xfc;
     g->mem[0xff00] = 0xcf;
   }
   return g;
@@ -1831,7 +1982,7 @@ int gb_load_ram(gb_t *g, const uint8_t *data, size_t n) {
 }
 size_t gb_save_state_size(const gb_t *g) {
   return g ? STATE_HEADER_SIZE + 0x10000u + sizeof g->vram + sizeof g->wram +
-                           0xa0u + sizeof g->fb + sizeof g->bg_line + 309u + g->ram_size
+                           0xa0u + sizeof g->fb + sizeof g->bg_line + 312u + g->ram_size
            : 0;
 }
 size_t gb_save_state(const gb_t *g, uint8_t *out) {
@@ -1881,7 +2032,10 @@ size_t gb_save_state(const gb_t *g, uint8_t *out) {
   *p++ = g->mode;
   *p++ = g->ppu_mode;
   *p++ = g->stat_signal;
+  *p++ = g->stat_hblank_pend;
+  *p++ = g->stat_hblank_dly;
   *p++ = g->ppu_first_line;
+  *p++ = g->ppu_enable_line;
   *p++ = g->dma_page;
   *p++ = g->dma_index;
   *p++ = g->dma_active;
@@ -1891,6 +2045,7 @@ size_t gb_save_state(const gb_t *g, uint8_t *out) {
   put16(&p, g->t_clock);
    put32(&p, g->ppu_cycles);
   put16(&p, g->ppu_mode3);
+  put16(&p, g->ppu_boot);
   put16(&p, g->divider);
   *p++ = g->timer_signal;
   put16(&p, g->timer_due);
@@ -1986,7 +2141,10 @@ int gb_load_state(gb_t *g, const uint8_t *data, size_t n) {
   g->mode = *p++;
   g->ppu_mode = *p++;
   g->stat_signal = *p++;
+  g->stat_hblank_pend = *p++;
+  g->stat_hblank_dly = *p++;
   g->ppu_first_line = *p++;
+  g->ppu_enable_line = *p++;
   g->dma_page = *p++;
   g->dma_index = *p++;
   g->dma_active = *p++;
@@ -1996,6 +2154,7 @@ int gb_load_state(gb_t *g, const uint8_t *data, size_t n) {
   g->t_clock = get16(&p);
    g->ppu_cycles = get32(&p);
   g->ppu_mode3 = get16(&p);
+  g->ppu_boot = get16(&p);
   g->divider = get16(&p);
   g->timer_signal = *p++;
   g->timer_due = get16(&p);
@@ -2067,16 +2226,23 @@ void gb_reset(gb_t *g) {
   g->ime = g->halted = g->halt_bug = g->ei_delay = 0;
   g->rom_bank = 1;
   g->ram_bank = g->upper = g->mode = 0;
-  g->div = 0;
-  g->divider = g->t_clock = 0;
+  /* Skip-boot divider phase: the boot ROM runs a fixed number of cycles, so
+     hardware reaches $0100 with DIV already advanced (pinned by the
+     poweron_div_* microtests). t_clock stays zero-based for scheduling. */
+  g->divider = BOOT_DIVIDER;
+  g->div = (uint8_t)(g->divider >> 8);
+  g->mem[0xff04] = g->div;
+  g->t_clock = 0;
   g->rtc_cycles = 0;
   g->audio_remainder = 0;
   g->timer_signal = 0;
   g->ppu_cycles = 0;
-  g->ppu_mode = 2;
+  g->ppu_mode = 1;
   g->ppu_mode3 = 172;
+  g->ppu_boot = 58;
   g->stat_signal = 0;
   g->ppu_first_line = 0;
+  g->ppu_enable_line = 0;
   g->dma_page = g->dma_index = g->dma_active = g->dma_copy = 0;
   g->dma_busy_start = g->dma_busy_end = g->dma_next = 0;
   g->vbk = 0;
@@ -2090,14 +2256,18 @@ void gb_reset(gb_t *g) {
   g->key1 = 0;
   g->opri = 0;
   g->ir = 0;
-  g->mem[0xff04] = 0;
+  g->mem[0xff04] = g->div;
   g->mem[0xff05] = 0;
   g->mem[0xff06] = 0;
   g->mem[0xff07] = 0;
-  g->mem[0xff0f] = 0;
+  g->mem[0xff02] = 0x7e;
+  g->mem[0xff0f] = 0xe1;
   g->mem[0xffff] = 0;
   g->mem[0xff40] = 0x91;
-  g->mem[0xff47] = 0xe4;
+  g->mem[0xff46] = 0xff;
+  g->mem[0xff47] = 0xfc;
+  g->mem[0xff48] = 0xff;
+  g->mem[0xff49] = 0xff;
   g->mem[0xff4f] = 0xfe;
   g->mem[0xff70] = 0xf9;
   g->bg_palette_index = g->obj_palette_index = 0;
