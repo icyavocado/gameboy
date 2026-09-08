@@ -5,7 +5,7 @@ set(CMAKE_C_STANDARD 11)
 set(CMAKE_C_STANDARD_REQUIRED ON)
 option(GB_ENABLE_TUI "Build the ncurses debugger frontend" ON)
 
-add_library(gb STATIC src/core/gb.c src/core/opcodes.c)
+add_library(gb STATIC src/core/gb.c src/core/audio.c src/core/ppu.c src/core/opcodes.c)
 target_include_directories(gb PUBLIC src/core)
 target_compile_options(gb PRIVATE -Wall -Wextra -Werror)
 

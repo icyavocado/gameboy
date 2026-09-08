@@ -1,4 +1,4 @@
-#include "gb.h"
+#include "gb_internal.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -10,10 +10,7 @@
 #endif
 #define STATE_VERSION 18u
 #define STATE_HEADER_SIZE 24u
-#define MAX_BREAKPOINTS 16u
 #define RTC_SAVE_SIZE 24u
-#define AUDIO_RATE 48000u
-#define AUDIO_CLOCK 4194304u
 static const uint8_t nintendo_logo[48] = {
     0xce, 0xed, 0x66, 0x66, 0xcc, 0x0d, 0x00, 0x0b,
     0x03, 0x73, 0x00, 0x83, 0x00, 0x0c, 0x00, 0x0d,
@@ -21,56 +18,6 @@ static const uint8_t nintendo_logo[48] = {
     0xdc, 0xcc, 0x6e, 0xe6, 0xdd, 0xdd, 0xd9, 0x99,
     0xbb, 0xbb, 0x67, 0x63, 0x6e, 0x0e, 0xec, 0xcc,
     0xdd, 0xdc, 0x99, 0x9f, 0xbb, 0xb9, 0x33, 0x3e};
-struct gb {
-  uint8_t *rom, *ram, *boot_rom, mem[65536];
-  uint8_t vram[2][0x2000], wram[8][0x1000], oam[0xa0];
-  uint8_t bg_palette[64], obj_palette[64];
-  size_t rom_size, ram_size;
-  uint32_t fb[160 * 144];
-  uint8_t bg_line[160];
-  uint16_t af, bc, de, hl, sp, pc, t_clock, divider;
-  uint8_t ime, ei_delay, halted, halt_bug, input, div, mbc, battery, ram_bank,
-      ram_enable, upper, mode, ppu_mode, stat_signal, stat_hblank_pend,
-      stat_hblank_dly, ppu_first_line,
-      ppu_enable_line, dma_page,
-      dma_index, dma_active, dma_copy, timer_signal, rtc_select,
-      rtc_latched_valid, rtc[5], rtc_latched[5], vbk, svbk, bg_palette_index,
-      obj_palette_index, key1, opri, ir, serial_active, boot_enabled,
-      double_speed;
-  uint16_t rom_bank;
-  uint16_t hdma_source, hdma_dest;
-  uint8_t hdma5;
-  uint16_t serial_cycles;
-  uint16_t timer_due;
-  uint16_t dma_busy_start, dma_busy_end, dma_next;
-  uint16_t ppu_mode3;
-  uint16_t ppu_boot;
-  unsigned ppu_cycles;
-  uint32_t rtc_cycles;
-  uint32_t audio_remainder;
-  uint32_t audio_phase[4];
-  uint32_t audio_host_phase[4];
-  int32_t audio_filter[2];
-  int32_t audio_hp[2];
-  int32_t audio_hp_x[2];
-  uint16_t noise_lfsr;
-  uint16_t audio_seq_cycles, audio_sweep_shadow, audio_wave_delay;
-  uint16_t audio_length[4];
-  uint8_t audio_seq_step, audio_volume[4], audio_envelope_timer[4],
-      audio_sweep_timer, audio_sweep_enabled, audio_sweep_negate;
-  uint8_t audio_enabled[4];
-  gb_model_t model;
-  uint8_t model_forced;
-  gb_serial_cb serial;
-  void *serial_user;
-  struct gb *serial_peer;
-  gb_audio_cb audio;
-  void *audio_user;
-  gb_bp_t breakpoints[MAX_BREAKPOINTS];
-  uint8_t breakpoint_used[MAX_BREAKPOINTS], debug_enabled, watch_hit, debug_fetch,
-      debug_pc_hit;
-  unsigned instruction_cycles;
-};
 static uint8_t lo(uint16_t x) { return (uint8_t)x; }
 static uint8_t hi(uint16_t x) { return (uint8_t)(x >> 8); }
 static uint16_t pr(uint8_t h, uint8_t l) { return (uint16_t)(h << 8 | l); }
@@ -84,9 +31,6 @@ static uint8_t rd(gb_t *, uint16_t);
 static void wr(gb_t *, uint16_t, uint8_t);
 static void tick(gb_t *, unsigned);
 static void ppu_tick(gb_t *);
-static void ppu_stat(gb_t *);
-static void audio_trigger(gb_t *, unsigned);
-static void audio_frame(gb_t *);
 static void rtc_second(gb_t *g) {
   uint8_t day_high = g->rtc[4];
   if (day_high & 0x40) return;
@@ -122,294 +66,6 @@ static void cgb_gdma(gb_t *g, unsigned blocks) {
   g->hdma5 = (uint8_t)(blocks - 1);
   while (g->hdma5 != 0xff)
     cgb_dma_block(g);
-}
-static uint8_t audio_read(const gb_t *g, uint16_t a) {
-  if (a == 0xff26)
-    return (uint8_t)(g->mem[a] | 0x70 | (g->audio_enabled[0] ? 1 : 0) |
-                     (g->audio_enabled[1] ? 2 : 0) |
-                     (g->audio_enabled[2] ? 4 : 0) |
-                     (g->audio_enabled[3] ? 8 : 0));
-  if (a >= 0xff30 && a <= 0xff3f)
-    return g->mem[a];
-  if ((a == 0xff76 || a == 0xff77) && g->model == GB_MODEL_CGB) {
-    uint8_t pcm[4] = {0};
-    for (unsigned channel = 0; channel < 4; channel++) {
-      uint16_t base = channel == 0 ? 0xff10 : channel == 1 ? 0xff16 :
-                      channel == 2 ? 0xff1a : 0xff20;
-      if (channel < 2) {
-        static const uint8_t duty[] = {0x01, 0x81, 0x87, 0x7e};
-        unsigned bit = (g->audio_phase[channel] >> 29) & 7;
-        pcm[channel] = (duty[g->mem[base] >> 6] & (1u << bit))
-                           ? g->audio_volume[channel] : 0;
-      } else if (channel == 2) {
-        if (g->audio_wave_delay)
-          continue;
-        if (!(g->mem[0xff1a] & 0x80))
-          continue;
-        unsigned index = (g->audio_phase[2] >> 16) & 31;
-        uint8_t sample = (uint8_t)((g->mem[0xff30 + index / 2] >>
-                                    (index & 1 ? 0 : 4)) & 15);
-        unsigned shift = g->mem[base + 2] >> 5;
-        pcm[channel] = shift == 0 ? 0 : (uint8_t)(sample >> (shift - 1));
-      } else {
-        pcm[channel] = !(g->noise_lfsr & 1) ? g->audio_volume[channel] : 0;
-      }
-    }
-    return (uint8_t)(a == 0xff76 ? pcm[1] << 4 | pcm[0]
-                                   : pcm[3] << 4 | pcm[2]);
-  }
-  /* Unused APU registers read as $FF. */
-  if (a == 0xff15 || a == 0xff1f || (a >= 0xff27 && a <= 0xff2f))
-    return 0xff;
-  /* Read masks (Pan Docs): write-only and unused bits read as 1. The stored
-     value stays raw so length/sweep counters keep working. Length registers
-     NR13/NR18/NR1D/NR1B are left raw: the sweep unit test reads back the
-     frequency shadow through them. */
-  if (a == 0xff10)
-    return (uint8_t)(g->mem[a] | 0x80);
-  if (a == 0xff11 || a == 0xff16)
-    return (uint8_t)(g->mem[a] | 0x3f);
-  if (a == 0xff14 || a == 0xff19 || a == 0xff1e)
-    return (uint8_t)(g->mem[a] | 0xb8);
-  if (a == 0xff1a)
-    return (uint8_t)(g->mem[a] | 0x7f);
-  if (a == 0xff1c)
-    return (uint8_t)(g->mem[a] | 0x9f);
-  if (a == 0xff20)
-    return 0xff;
-  if (a == 0xff23)
-    return (uint8_t)(g->mem[a] | 0xbf);
-  return g->mem[a];
-}
-static void audio_trigger(gb_t *g, unsigned channel) {
-  static const uint16_t dac_reg[] = {0xff12, 0xff17, 0xff1a, 0xff21};
-  static const uint16_t length_reg[] = {0xff11, 0xff16, 0xff1b, 0xff20};
-  static const uint16_t volume_reg[] = {0xff12, 0xff17, 0xff1c, 0xff21};
-  g->audio_enabled[channel] = (uint8_t)((g->mem[dac_reg[channel]] &
-                                          (channel == 2 ? 0x80 : 0xf8)) != 0);
-  g->audio_phase[channel] = 0;
-  g->audio_host_phase[channel] = 0;
-  if (channel == 2) {
-    g->audio_length[2] = (uint16_t)(256 - g->mem[length_reg[2]]);
-    g->audio_wave_delay = (uint16_t)(2 * (2048 -
-        (((g->mem[0xff1e] & 7) << 8) | g->mem[0xff1d])));
-    g->audio_wave_delay = (uint16_t)(g->audio_wave_delay + 6);
-  } else {
-    g->audio_length[channel] =
-        (uint16_t)(64 - (g->mem[length_reg[channel]] & 0x3f));
-  }
-  if (channel == 2)
-    g->audio_volume[2] = (uint8_t)((g->mem[0xff1c] >> 5) & 3);
-  if (channel != 2) {
-    g->audio_volume[channel] = g->mem[volume_reg[channel]] >> 4;
-    g->audio_envelope_timer[channel] = g->mem[volume_reg[channel]] & 7;
-    if (!g->audio_envelope_timer[channel]) g->audio_envelope_timer[channel] = 8;
-  }
-  if (channel == 0) {
-    g->audio_sweep_shadow = (uint16_t)((g->mem[0xff14] & 7) << 8 |
-                                       g->mem[0xff13]);
-    g->audio_sweep_timer = g->mem[0xff10] >> 4 & 7;
-    if (!g->audio_sweep_timer) g->audio_sweep_timer = 8;
-    g->audio_sweep_enabled = (uint8_t)((g->mem[0xff10] & 0x77) != 0);
-    g->audio_sweep_negate = (uint8_t)((g->mem[0xff10] >> 3) & 1);
-  }
-  if (channel == 3)
-    g->noise_lfsr = 0x7fff;
-  g->mem[0xff26] |= (uint8_t)(1u << channel);
-}
-static int16_t audio_sample(gb_t *g, unsigned channel) {
-  static const uint8_t duty[] = {0x01, 0x81, 0x87, 0x7e};
-  static const uint16_t volume_reg[] = {0xff12, 0xff17, 0xff1c, 0xff21};
-  static const uint16_t freq_low[] = {0xff13, 0xff18, 0xff1d, 0};
-  static const uint16_t freq_high[] = {0xff14, 0xff19, 0xff1e, 0};
-  static const uint16_t duty_reg[] = {0xff11, 0xff16, 0, 0};
-  uint8_t control = g->mem[volume_reg[channel]];
-  if (channel == 2) {
-    unsigned index = (g->audio_host_phase[2] >> 16) & 31;
-    uint8_t volume = (control >> 5) & 3;
-    uint8_t sample = (g->mem[0xff30 + index / 2] >> (index & 1 ? 0 : 4)) & 15;
-    uint16_t frequency = (uint16_t)((g->mem[freq_high[channel]] & 7) << 8 |
-                                    g->mem[freq_low[channel]]);
-    /* 32 samples per period map to 2^21 phase units; sample clock is
-       2097152/(2048-f) Hz, so one period is 65536/(2048-f) Hz. */
-    if (frequency < 2048)
-      g->audio_host_phase[2] +=
-          (uint32_t)((((uint64_t)65536u << 21) / (2048u - frequency)) /
-                     AUDIO_RATE);
-    if (!volume) return 0;
-    if (volume == 1) return (int16_t)(((int)sample - 8) * 128);
-    if (volume == 2) return (int16_t)(((int)sample - 8) * 64);
-    return (int16_t)(((int)sample - 8) * 32);
-  }
-  if (channel == 3) {
-    uint8_t volume = g->audio_volume[3];
-    if (!volume)
-      return 0;
-    return (int16_t)(volume * (!(g->noise_lfsr & 1) ? 512 : -512));
-  }
-  uint8_t volume = g->audio_volume[channel], duty_index = g->mem[duty_reg[channel]] >> 6;
-  uint16_t frequency = (uint16_t)((g->mem[freq_high[channel]] & 7) << 8 |
-                                  g->mem[freq_low[channel]]);
-  uint32_t step = frequency < 2048
-                      ? (uint32_t)((((uint64_t)131072u << 32) /
-                                    (2048u - frequency)) /
-                                   AUDIO_RATE)
-                      : 0;
-  unsigned bit = (g->audio_host_phase[channel] >> 29) & 7;
-  g->audio_host_phase[channel] += step;
-  return (int16_t)((duty[duty_index] & (1u << bit) ? volume : -volume) * 512);
-}
-static void audio_tick(gb_t *g) {
-  static const uint16_t freq_low[] = {0xff13, 0xff18, 0xff1d};
-  static const uint16_t freq_high[] = {0xff14, 0xff19, 0xff1e};
-  for (unsigned channel = 0; channel < 3; channel++) {
-    if (!g->audio_enabled[channel])
-      continue;
-    uint16_t frequency = (uint16_t)((g->mem[freq_high[channel]] & 7) << 8 |
-                                    g->mem[freq_low[channel]]);
-    unsigned denominator = 2048u - frequency;
-    if (!denominator)
-      continue;
-    if (channel == 2) {
-      if (g->audio_wave_delay) {
-        if (--g->audio_wave_delay == 0)
-          g->audio_phase[channel] = 0x10000;
-      } else {
-        g->audio_phase[channel] += (uint32_t)(0x8000u / denominator);
-      }
-    } else {
-      g->audio_phase[channel] += (uint32_t)(0x8000000u / denominator);
-    }
-  }
-  if (g->audio_enabled[3]) {
-    uint16_t base = 0xff20;
-    uint8_t divisor = g->mem[base] & 7, shift = g->mem[base] >> 4;
-    unsigned period = (divisor ? divisor * 16u : 8u) << shift;
-    g->audio_phase[3]++;
-    if (period && g->audio_phase[3] % period == 0) {
-      uint16_t bit = (uint16_t)((g->noise_lfsr ^ (g->noise_lfsr >> 1)) & 1);
-      g->noise_lfsr = (uint16_t)((g->noise_lfsr >> 1) | (bit << 14));
-      if (g->mem[base] & 8)
-        g->noise_lfsr = (uint16_t)((g->noise_lfsr & ~(1u << 6)) | (bit << 6));
-    }
-  }
-}
-static void audio_frame(gb_t *g) {
-  unsigned frames;
-  int16_t samples[805 * 2];
-  g->audio_remainder += 70224u * AUDIO_RATE;
-  frames = g->audio_remainder / AUDIO_CLOCK;
-  g->audio_remainder %= AUDIO_CLOCK;
-  uint8_t routing = g->mem[0xff25];
-  uint8_t left = g->mem[0xff24] >> 4, right = g->mem[0xff24] & 7;
-  for (unsigned i = 0; i < frames; i++) {
-    int16_t value[4];
-    for (unsigned channel = 0; channel < 4; channel++)
-      value[channel] = g->audio_enabled[channel] ? audio_sample(g, channel) : 0;
-    samples[i * 2] = 0;
-    samples[i * 2 + 1] = 0;
-    for (unsigned channel = 0; channel < 4; channel++) {
-      if (routing & (uint8_t)(1u << (channel + 4))) samples[i * 2] += value[channel];
-      if (routing & (uint8_t)(1u << channel)) samples[i * 2 + 1] += value[channel];
-    }
-    int left_sample = samples[i * 2] * left / 8;
-    int right_sample = samples[i * 2 + 1] * right / 8;
-    g->audio_filter[0] += (left_sample - g->audio_filter[0]) / 4;
-    g->audio_filter[1] += (right_sample - g->audio_filter[1]) / 4;
-    left_sample = g->audio_filter[0];
-    right_sample = g->audio_filter[1];
-    /* First-order high-pass (~7.5 Hz cutoff): strips the DC offset that
-       low-duty square waves carry, which real hardware blocks with output
-       capacitors. A stuck low note stays audible; the cone-thumping bias
-       does not. */
-    int hp_left =
-        left_sample - g->audio_hp_x[0] + (int)(g->audio_hp[0] * 1023 / 1024);
-    int hp_right =
-        right_sample - g->audio_hp_x[1] + (int)(g->audio_hp[1] * 1023 / 1024);
-    g->audio_hp_x[0] = left_sample;
-    g->audio_hp_x[1] = right_sample;
-    g->audio_hp[0] = hp_left;
-    g->audio_hp[1] = hp_right;
-    left_sample = hp_left;
-    right_sample = hp_right;
-    if (left_sample > 32767) left_sample = 32767;
-    if (left_sample < -32768) left_sample = -32768;
-    if (right_sample > 32767) right_sample = 32767;
-    if (right_sample < -32768) right_sample = -32768;
-    samples[i * 2] = (int16_t)left_sample;
-    samples[i * 2 + 1] = (int16_t)right_sample;
-  }
-  if (g->audio && (g->mem[0xff26] & 0x80))
-    g->audio(g->audio_user, samples, frames);
-}
-static int audio_sweep_next(gb_t *g) {
-  int delta = g->audio_sweep_shadow >> (g->mem[0xff10] & 7);
-  return g->audio_sweep_negate ? (int)g->audio_sweep_shadow - delta
-                               : (int)g->audio_sweep_shadow + delta;
-}
-static void audio_sweep(gb_t *g) {
-  uint8_t shift = g->mem[0xff10] & 7;
-  int next = audio_sweep_next(g);
-  if (next > 2047 || next < 0) {
-    g->audio_enabled[0] = 0;
-    g->mem[0xff26] &= (uint8_t)~1;
-    return;
-  }
-  if (!shift)
-    return;
-  g->audio_sweep_shadow = (uint16_t)next;
-  g->mem[0xff13] = (uint8_t)next;
-  g->mem[0xff14] = (uint8_t)((g->mem[0xff14] & 0xf8) | (next >> 8));
-  next = audio_sweep_next(g);
-  if (next > 2047 || next < 0) {
-    g->audio_enabled[0] = 0;
-    g->mem[0xff26] &= (uint8_t)~1;
-  }
-}
-static void audio_sequence(gb_t *g) {
-  static const uint16_t length_reg[] = {0xff11, 0xff16, 0xff1b, 0xff20};
-  unsigned step = g->audio_seq_step;
-  if (!(step & 1)) {
-    for (unsigned i = 0; i < 4; i++) {
-      if (g->audio_length[i] && !(g->mem[length_reg[i] + 3] & 0x40))
-        continue;
-      if (g->audio_length[i] && --g->audio_length[i] == 0) {
-        g->audio_enabled[i] = 0;
-        g->mem[0xff26] &= (uint8_t)~(1u << i);
-      }
-    }
-  }
-  if (step == 2 || step == 6) {
-    if (g->audio_sweep_timer && --g->audio_sweep_timer == 0) {
-      if (g->audio_sweep_enabled && ((g->mem[0xff10] >> 4) & 7))
-        audio_sweep(g);
-      g->audio_sweep_timer = (g->mem[0xff10] >> 4) & 7;
-      if (!g->audio_sweep_timer) g->audio_sweep_timer = 8;
-    }
-  }
-  if (step == 7) {
-    for (unsigned i = 0; i < 4; i++) {
-      uint16_t base = i == 0 ? 0xff10 : i == 1 ? 0xff16 :
-                      i == 2 ? 0xff1a : 0xff20;
-      uint8_t control = g->mem[base + (i == 3 ? 1 : 2)];
-      uint8_t timer = g->audio_envelope_timer[i];
-      uint8_t period = (uint8_t)(control & 7);
-      if (timer && --timer == 0) {
-        uint8_t volume = g->audio_volume[i];
-        if (period) {
-          if (control & 8) {
-            if (volume < 15) volume++;
-          } else if (volume) {
-            volume--;
-          }
-        }
-        g->audio_volume[i] = volume;
-        timer = period ? period : 8;
-      }
-      g->audio_envelope_timer[i] = timer;
-    }
-  }
-  g->audio_seq_step = (uint8_t)((step + 1) & 7);
 }
 static unsigned timer_bit(const gb_t *g) {
   static const unsigned bits[] = {9, 3, 5, 7};
@@ -644,9 +300,10 @@ static uint8_t rd(gb_t *g, uint16_t a) {
         (g->ppu_mode == 2 || g->ppu_mode == 3))
       return 0xff;
   }
-  if (g->boot_enabled && a < 0x100)
+  if (g->boot_enabled && g->boot_rom && a < 0x100)
     return g->boot_rom[a];
-  if (g->boot_enabled && g->model == GB_MODEL_CGB && a >= 0x200 && a < 0x900)
+  if (g->boot_enabled && g->boot_rom && g->model == GB_MODEL_CGB &&
+      a >= 0x200 && a < 0x900)
     return g->boot_rom[a];
   if (a < 0x8000 && g->rom)
     return g->rom[rb(g, a)];
@@ -1189,160 +846,6 @@ static int cb(gb_t *g, uint8_t o) {
     sr(g, n, r);
   }
   return n == 6 ? 16 : 8;
-}
-static uint32_t cgb_color(const uint8_t *palette, unsigned index) {
-  uint16_t value = (uint16_t)(palette[index * 2] | palette[index * 2 + 1] << 8);
-  unsigned r = value & 31, green = (value >> 5) & 31, b = (value >> 10) & 31;
-  return 0xff000000u | ((r * 255 / 31) << 16) | ((green * 255 / 31) << 8) |
-         (b * 255 / 31);
-}
-static uint8_t tile_pixel(const gb_t *g, int tile, unsigned row, unsigned col,
-                          unsigned bank) {
-  int base = tile >= 384 ? 0x1000 + (tile - 512) * 16 : tile * 16;
-  size_t a = (size_t)(base + (int)(row * 2));
-  uint8_t lo = g->vram[bank][a & 0x1fff], hi = g->vram[bank][(a + 1) & 0x1fff];
-  return (uint8_t)(((hi >> (7 - col)) & 1) * 2 + ((lo >> (7 - col)) & 1));
-}
-static void ppu_line(gb_t *g, unsigned y) {
-  static const uint32_t color[] = {0xfff8f8f8, 0xffa8a8a8, 0xff585858, 0xff101010};
-  uint8_t lcdc = g->mem[0xff40], scx = g->mem[0xff43], scy = g->mem[0xff42];
-  uint8_t wy = g->mem[0xff4a], wx = g->mem[0xff4b];
-  unsigned window = (lcdc & 0x20) && y >= wy;
-  for (unsigned x = 0; x < 160; x++) {
-    unsigned px = x + scx, py = y + scy;
-    if (window && x + 7 >= wx) {
-      px = x + 7 - wx;
-      py = y - wy;
-    }
-    unsigned map = window ? ((lcdc & 0x40) ? 0x1c00 : 0x1800)
-                          : ((lcdc & 8) ? 0x1c00 : 0x1800);
-    unsigned tx = (px >> 3) & 31, ty = (py >> 3) & 31;
-    uint8_t t = g->vram[0][map + ty * 32 + tx], attr = g->model == GB_MODEL_CGB
-                                                        ? g->vram[1][map + ty * 32 + tx]
-                                                        : 0;
-    uint8_t pal = g->mem[0xff47];
-     int tile = (lcdc & 0x10) ? t : (int8_t)t + 512;
-    unsigned row = py & 7, col = px & 7;
-    if (g->model == GB_MODEL_CGB) {
-      if (attr & 0x20) col = 7 - col;
-      if (attr & 0x40) row = 7 - row;
-    }
-    uint8_t p = (lcdc & 1) ? tile_pixel(g, tile, row, col,
-                                         g->model == GB_MODEL_CGB ? (attr >> 3) & 1 : 0) : 0;
-    g->bg_line[x] = (uint8_t)(p | ((attr & 0x80) ? 0x80 : 0));
-    g->fb[y * 160 + x] = g->model == GB_MODEL_CGB
-                              ? cgb_color(g->bg_palette, (attr & 7) * 4 + p)
-                              : color[(pal >> (p * 2)) & 3];
-  }
-  if ((lcdc & 2) && (lcdc & 0x80)) {
-    unsigned height = (lcdc & 4) ? 16 : 8, drawn = 0;
-    bool used[40] = {false};
-    while (drawn < 10) {
-      unsigned i = 40, best = 256;
-      for (unsigned j = 0; j < 40; j++) {
-        int line = (int)y - g->oam[j * 4] + 16;
-        if (used[j] || line < 0 || line >= (int)height) continue;
-        if (i == 40 || (g->opri && g->oam[j * 4 + 1] < best)) {
-          i = j;
-          best = g->oam[j * 4 + 1];
-        }
-      }
-      if (i == 40) break;
-      used[i] = true;
-      uint8_t sy = g->oam[i * 4], sx = g->oam[i * 4 + 1], t = g->oam[i * 4 + 2], a = g->oam[i * 4 + 3];
-      int line = (int)y - sy + 16;
-      if (line < 0 || line >= (int)height) continue;
-      drawn++;
-      if (a & 0x40) line = (int)height - 1 - line;
-      if (height == 16) t &= 0xfe;
-      for (unsigned col = 0; col < 8; col++) {
-        unsigned tile_col = a & 0x20 ? 7 - col : col;
-        int xx = (int)sx - 8 + (int)col;
-        if (xx < 0 || xx >= 160) continue;
-        uint8_t p = tile_pixel(g, t + (line >= 8), (unsigned)line & 7, tile_col,
-                               g->model == GB_MODEL_CGB && (a & 8) ? 1 : 0);
-        if (!p || ((a & 0x80) && (g->bg_line[xx] & 0x0f))) continue;
-        if (g->model == GB_MODEL_CGB && (g->bg_line[xx] & 0x80)) continue;
-        uint8_t pal = a & 0x10 ? g->mem[0xff49] : g->mem[0xff48];
-        g->fb[y * 160 + xx] = g->model == GB_MODEL_CGB
-                                  ? cgb_color(g->obj_palette, (a & 7) * 4 + p)
-                                  : color[(pal >> (p * 2)) & 3];
-      }
-    }
-  }
-}
-static void ppu_stat(gb_t *g) {
-  if (!(g->mem[0xff40] & 0x80))
-    return; /* comparison clock stopped while LCD is off */
-  uint8_t lyc = g->mem[0xff45], stat = g->mem[0xff41];
-  /* The post-enable truncated mode 2 does not assert the OAM signal on
-     hardware (GBMicrotest lcdon_to_oam_int_l0/int_oam_*: the first OAM edge
-     arrives at line 1's full mode 2). Gate it on the enable line being over
-     so the line-1 entry still produces a clean 0->1 edge. */
-  unsigned signal = ((g->ppu_mode == 0) && (stat & 8)) ||
-                    ((g->ppu_mode == 1) && (stat & 16)) ||
-                     ((g->ppu_mode == 2) && (stat & 32) && !g->ppu_enable_line) ||
-                    (lyc == g->mem[0xff44] && (stat & 64));
-  if (signal && !g->stat_signal) g->mem[0xff0f] |= 2;
-  g->stat_signal = (uint8_t)signal;
-}
-static unsigned ppu_mode3_length(gb_t *g) {
-  /* Pan Docs "Mode 3 length": 172 dots base + SCX discard penalty + window
-     setup penalty + one fetch penalty per sprite on the line. */
-  uint8_t lcdc = g->mem[0xff40];
-  unsigned y = g->mem[0xff44];
-  unsigned len = 172 + (g->mem[0xff43] & 4);
-  int wx = (int)g->mem[0xff4b] - 7;
-  if ((lcdc & 0x20) && y >= g->mem[0xff4a] && wx > 0 && wx < 160)
-    len += 6;
-  if (!(lcdc & 2)) return len;
-  unsigned height = (lcdc & 4) ? 16 : 8;
-  uint8_t idx[10];
-  unsigned n = 0;
-  for (unsigned j = 0; j < 40 && n < 10; j++) {
-    int line = (int)y - g->oam[j * 4] + 16;
-    if (line < 0 || line >= (int)height) continue;
-    idx[n++] = (uint8_t)j;
-  }
-  for (unsigned i = 1; i < n; i++) { /* stable: OAM order breaks X ties */
-    uint8_t t = idx[i], k = (uint8_t)i;
-    while (k > 0 && g->oam[idx[k - 1] * 4 + 1] > g->oam[t * 4 + 1]) {
-      idx[k] = idx[k - 1];
-      k--;
-    }
-    idx[k] = t;
-  }
-  bool seen = false;
-  int seen_key = 0;
-  for (unsigned i = 0; i < n; i++) {
-    uint8_t sx = g->oam[idx[i] * 4 + 1];
-    if (sx >= 168) continue; /* past the right edge */
-    int x = (int)sx - 8;
-    int win = (lcdc & 0x20) && y >= g->mem[0xff4a] && x >= wx;
-    int eff = win ? x - wx : x + g->mem[0xff43];
-    int tile = eff >= 0 ? eff / 8 : -((-eff + 7) / 8);
-    int key = (win << 24) | (tile & 0xffffff);
-    int wait = 5 - (eff - tile * 8);
-    if (wait < 0) wait = 0;
-    /* The first object fetch overlaps the initial fetcher startup. */
-    if (!seen)
-      len += 3 + (unsigned)wait;
-    else if (key != seen_key)
-      len += 6 + (unsigned)wait;
-    else
-      len += 6;
-    seen = true;
-    seen_key = key;
-  }
-  return len;
-}
-static unsigned hblank_edge_delay(gb_t *g) {
-  /* Dots between the mode-0 term (mode bits flip immediately) and the
-     HBlank STAT IF edge, per SCX. GBMicrotest hblank_int_scxN_if_* slices
-     each SCX's edge position with ~1-instruction resolution; SCX=3 needs
-     the edge ~1 instruction after the mode-bits flip for _a/_c/_d. */
-  static const uint8_t dly[8] = {0, 1, 1, 3, 0, 1, 1, 3};
-  return dly[g->mem[0xff43] & 7];
 }
 static void ppu_tick(gb_t *g) {
   if (!(g->mem[0xff40] & 0x80)) return;
@@ -2174,6 +1677,8 @@ int gb_load_state(gb_t *g, const uint8_t *data, size_t n) {
   g->serial_active = *p++;
   g->serial_cycles = get16(&p);
   g->boot_enabled = *p++;
+  if (!g->boot_rom)
+    g->boot_enabled = 0;
   g->double_speed = *p++;
   g->hdma_source = get16(&p);
   g->hdma_dest = get16(&p);

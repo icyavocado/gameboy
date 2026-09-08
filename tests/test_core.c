@@ -873,6 +873,25 @@ UTEST(core, save_state_round_trip) {
   gb_destroy(g);
 }
 
+UTEST(core, state_without_boot_rom_is_safe) {
+  static const uint8_t boot[0x100] = {0x00};
+  gb_t *with_boot = load((const uint8_t[]){0x00}, 1);
+  ASSERT_EQ(gb_load_boot_rom(with_boot, boot, sizeof boot), 0);
+  gb_reset(with_boot);
+  size_t n = gb_save_state_size(with_boot);
+  uint8_t *state = malloc(n);
+  ASSERT_TRUE(state);
+  ASSERT_EQ(gb_save_state(with_boot, state), n);
+
+  gb_t *without_boot = load((const uint8_t[]){0x00}, 1);
+  ASSERT_EQ(gb_load_state(without_boot, state, n), 0);
+  gb_dbg_step(without_boot);
+
+  free(state);
+  gb_destroy(with_boot);
+  gb_destroy(without_boot);
+}
+
 UTEST(core, apu_square_channel) {
   gb_t *g = load((const uint8_t[]){0x00}, 1);
   audio_calls = 0;
@@ -1347,6 +1366,7 @@ int main(void) {
   core_battery_ram_round_trip();
   core_battery_ram_survives_reset();
   core_save_state_round_trip();
+  core_state_without_boot_rom_is_safe();
   core_apu_square_channel();
   core_apu_wave_and_noise_channels();
   core_apu_highpass_removes_dc();
@@ -1367,6 +1387,6 @@ int main(void) {
   core_timer_overflow_reload_delay();
   core_timer_overflow_write_cancel_and_ignore();
   ppu_stat_write_rechecks_coincidence();
-  puts("36 tests passed");
+  puts("37 tests passed");
   return 0;
 }
